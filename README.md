@@ -24,5 +24,8 @@ the model (FRBR Works/Expressions/Fragments, ELI-aligned ids, adapter tiers,
 trust chain) and the roadmap (Revised Acts diffing, Portugal DRE adapter, MCP
 server, attestation signing).
 
-Status: v0 tracer bullet — one jurisdiction (Ireland, eISB Tier-A XML), one
-act end-to-end, all v0 acceptance criteria in `SPEC.md` passing.
+Status: M2 - Ireland (eISB + Law Reform Commission, both Tier-A XML), one act
+in two Expressions (enacted and revised). `donna diff` shows real amendment
+history; the same quote verifies against the revised text and fails against
+the enacted text with a pointer to what the law used to say. All acceptance
+criteria in `SPEC.md` passing.

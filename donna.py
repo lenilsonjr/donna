@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """donna — the law layer. Versioned, hash-anchored legal corpus with a resolver
-and quote verifier. See SPEC.md; v0 covers the Ireland (eISB) adapter.
+and quote verifier. See SPEC.md; v0 covers the Ireland (eISB + LRC) adapter.
 
 Usage:
-  donna.py ingest ie/2018/act/7            fetch + parse + store + attest
+  donna.py ingest ie/2018/act/7            fetch + parse + store + attest (enacted)
+  donna.py ingest ie/2018/act/7@revised    LRC Revised Act as a second Expression
   donna.py resolve "s 42 DPA 2018"         citation -> canonical id
+  donna.py versions ie/2018/act/7          list Expressions of a Work
   donna.py text <id>                       canonical text of fragment/expression
   donna.py status <id>                     provenance: hashes, attestation, checks
   donna.py quote <fragment-id> "<text>"    exit 0 iff verbatim (typographic tolerance)
@@ -17,8 +19,8 @@ import argparse, difflib, hashlib, json, re, sqlite3, sys, unicodedata, urllib.r
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
-PARSER_ID = "donna-ie/0.1.0"
-UA = "donna/0.1 (open legal corpus tool; +https://github.com/lenilsonjr)"
+PARSER_ID = "donna-ie/0.2.0"
+UA = "donna/0.2 (open legal corpus tool)"
 
 # ---------------------------------------------------------------- storage
 
@@ -66,7 +68,7 @@ def canonical(text):
 
 TYPOGRAPHIC = str.maketrans({"‘": "'", "’": "'", "“": '"',
                              "”": '"', "—": "-", "–": "-",
-                             " ": " "})
+                             " ": " "})
 
 def quote_normal(text):
     return re.sub(r"\s+", " ", text.translate(TYPOGRAPHIC)).strip()
@@ -78,42 +80,60 @@ IE_EMPTY = {"emdash": "—", "odq": "“", "cdq": "”", "osq": "‘",
             "afada": "á", "efada": "é", "ifada": "í",
             "ofada": "ó", "ufada": "ú", "cafada": "Á",
             "cefada": "É", "cifada": "Í", "cofada": "Ó",
-            "cufada": "Ú", "marker": ""}
+            "cufada": "Ú", "marker": "", "bull": "•"}
 
-def ie_url(year, num):
+def ie_url(year, num, version):
+    if version == "revised":
+        return f"https://revisedacts.lawreform.ie/eli/{year}/act/{num}/revised/en/xml"
     return f"https://www.irishstatutebook.ie/eli/{year}/act/{num}/enacted/en/xml"
 
 def _fixup_xml(raw):
+    """Strip the DOCTYPE (resolving its internal-subset entities) and neutralize
+    undefined entities. Entity values may carry markup; tags are dropped."""
     text = raw.decode("utf-8", errors="replace")
-    text = re.sub(r"<!DOCTYPE[^>]*>", "", text)
-    return re.sub(r"&(?!(amp|lt|gt|quot|apos);)(\w+);", r"[\2]", text)
+    entities = {}
+    subset = re.search(r"<!DOCTYPE[^\[>]*\[(.*?)\]\s*>", text, re.S)
+    if subset:
+        for name, val in re.findall(r'<!ENTITY\s+(\w+)\s+"(.*?)"\s*>', subset.group(1), re.S):
+            entities[name] = re.sub(r"<[^>]+>", "", val)
+    text = re.sub(r"<!DOCTYPE[^\[>]*\[.*?\]\s*>|<!DOCTYPE[^>]*>", "", text,
+                  count=1, flags=re.S)
+    text = re.sub(r"&(?!(?:amp|lt|gt|quot|apos);)(\w+);",
+                  lambda m: entities.get(m.group(1), f"[{m.group(1)}]"), text)
+    return text, entities
 
-def _serialize(el, out, fn_count):
+def _serialize(el, out, counts):
     if el.tag == "fn":
-        fn_count[0] += 1
+        counts["fn"] += 1
         if el.tail:
-            out.append(el.tail)
+            out.append(el.tail.replace("\n", " "))
+        return
+    if el.tag == "div" and "annotation" in (el.get("class") or ""):
+        counts["ann"] += 1
+        if el.tail:
+            out.append(el.tail.replace("\n", " "))
         return
     if el.tag in IE_EMPTY:
         out.append(IE_EMPTY[el.tag])
     if el.text:
-        out.append(el.text)
+        out.append(el.text.replace("\n", " "))
     for child in el:
-        _serialize(child, out, fn_count)
+        _serialize(child, out, counts)
     if el.tag in ("p", "tr"):
         out.append("\n")
     if el.tag == "td":
         out.append(" | ")
     if el.tail:
-        out.append(el.tail)
+        out.append(el.tail.replace("\n", " "))
 
-def _el_text(el, fn_count=None):
-    out, fc = [], fn_count if fn_count is not None else [0]
-    _serialize(el, out, fc)
+def _el_text(el, counts=None):
+    out = []
+    _serialize(el, out, counts if counts is not None else {"fn": 0, "ann": 0})
     return canonical("".join(out))
 
 def ie_parse(raw):
-    root = ET.fromstring(_fixup_xml(raw))
+    text, entities = _fixup_xml(raw)
+    root = ET.fromstring(text)
     meta = root.find("metadata")
     work_meta = {
         "title": (meta.findtext("title") or "").strip(),
@@ -121,7 +141,12 @@ def ie_parse(raw):
         "number": meta.findtext("number").strip(),
         "type": "act",
     }
-    fragments, fn_count = [], [0]
+    revised_date = None
+    if "updatedtodate" in entities:
+        revised_date = datetime.strptime(
+            entities["updatedtodate"].strip(), "%d %B %Y").date().isoformat()
+    counts = {"fn": 0, "ann": 0}
+    fragments = []
     for sect in root.iter("sect"):
         num_el, title_el = sect.find("number"), sect.find("title")
         number = (num_el.text or "").strip().rstrip(".") if num_el is not None else ""
@@ -130,18 +155,19 @@ def ie_parse(raw):
         for child in sect:
             if child.tag in ("number", "title"):
                 continue
-            body.append(_el_text(child, fn_count))
+            body.append(_el_text(child, counts))
         fragments.append({"kind": "section", "number": number, "heading": heading,
                           "text": canonical("\n".join(body))})
     for i, sched in enumerate(root.iter("schedule"), 1):
         title_el = sched.find("title")
         heading = _el_text(title_el) if title_el is not None else f"Schedule {i}"
-        body = [_el_text(c, fn_count) for c in sched if c.tag != "title"]
+        body = [_el_text(c, counts) for c in sched if c.tag != "title"]
         fragments.append({"kind": "schedule", "number": str(i), "heading": heading,
                           "text": canonical("\n".join(body))})
-    return work_meta, fragments, fn_count[0]
+    extras = {"fn": counts["fn"], "ann": counts["ann"], "revised_date": revised_date}
+    return work_meta, fragments, extras
 
-def ie_checks(fragments, fn_stripped):
+def ie_checks(fragments, extras):
     sections = [f for f in fragments if f["kind"] == "section"]
     numbers, gaps, empties = [], [], []
     for f in fragments:
@@ -155,7 +181,8 @@ def ie_checks(fragments, fn_stripped):
     return {"sections": len(sections),
             "schedules": len(fragments) - len(sections),
             "numbering_gaps": gaps, "empty_fragments": empties,
-            "footnotes_stripped": fn_stripped}
+            "footnotes_stripped": extras["fn"],
+            "annotations_stripped": extras["ann"]}
 
 ADAPTERS = {"ie": {"tier": "A", "url": ie_url, "parse": ie_parse, "checks": ie_checks}}
 
@@ -167,21 +194,27 @@ def fetch(url):
         return r.read()
 
 def ingest(con, work_path):
-    m = re.fullmatch(r"(\w+)/(\d{4})/(\w+)/(\w+)", work_path)
+    m = re.fullmatch(r"(\w+)/(\d{4})/(\w+)/(\w+)(?:@(enacted|revised))?", work_path)
     if not m:
-        sys.exit(f"work path must look like ie/2018/act/7, got {work_path!r}")
-    jur, year, wtype, num = m.groups()
+        sys.exit(f"work path must look like ie/2018/act/7[@revised], got {work_path!r}")
+    jur, year, wtype, num, version = m.groups()
+    version = version or "enacted"
     adapter = ADAPTERS.get(jur)
     if not adapter:
         sys.exit(f"no adapter for jurisdiction {jur!r} (have: {', '.join(ADAPTERS)})")
-    url = adapter["url"](year, num)
+    url = adapter["url"](year, num, version)
     raw = fetch(url)
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    work_meta, fragments, fn_stripped = adapter["parse"](raw)
-    checks = adapter["checks"](fragments, fn_stripped)
+    work_meta, fragments, extras = adapter["parse"](raw)
+    checks = adapter["checks"](fragments, extras)
 
+    label = version
+    if version == "revised":
+        if not extras["revised_date"]:
+            sys.exit("revised source did not declare an updated-to date")
+        label = f"revised-{extras['revised_date']}"
     work_id = f"{jur}/{year}/{wtype}/{num}"
-    expr_id = f"{work_id}@enacted:en"
+    expr_id = f"{work_id}@{label}:en"
     frag_rows, frag_hashes = [], []
     for i, f in enumerate(fragments):
         fid = f"{expr_id}#{'sec' if f['kind'] == 'section' else 'sched'}-{f['number']}"
@@ -196,11 +229,11 @@ def ingest(con, work_path):
                     (work_id, jur, work_meta["type"], work_meta["year"],
                      work_meta["number"], work_meta["title"]))
         con.execute("INSERT OR REPLACE INTO expressions VALUES (?,?,?,?,?,?,?)",
-                    (expr_id, work_id, "enacted", "en", url, expr_hash, fetched_at))
+                    (expr_id, work_id, label, "en", url, expr_hash, fetched_at))
         con.execute("DELETE FROM fragments WHERE expression_id = ?", (expr_id,))
         con.executemany("INSERT INTO fragments VALUES (?,?,?,?,?,?,?,?)", frag_rows)
         if HAS_FTS:
-            con.execute("DELETE FROM fragments_fts WHERE id LIKE ?", (expr_id + "%",))
+            con.execute("DELETE FROM fragments_fts WHERE id LIKE ?", (expr_id + "#%",))
             con.executemany("INSERT INTO fragments_fts VALUES (?,?,?)",
                             [(r[0], r[4], r[5]) for r in frag_rows])
         con.execute("INSERT INTO attestations(expression_id, source_url, fetched_at,"
@@ -220,17 +253,27 @@ def acronym(title):
              and w.upper() not in ("OF", "AND", "THE", "AN", "A", "ACT")]
     return "".join(w[0].upper() for w in words) + "A"  # DATA PROTECTION -> DPA
 
+def expression_for(con, work_id, version):
+    row = con.execute("SELECT id FROM expressions WHERE work_id = ? AND version"
+                      " LIKE ? ORDER BY version DESC",
+                      (work_id, version + "%")).fetchone()
+    if not row:
+        sys.exit(f"no {version} expression ingested for {work_id!r}")
+    return row[0]
+
 def resolve(con, citation):
     c = citation.strip()
-    m = re.search(r"irishstatutebook\.ie/eli/(\d{4})/act/(\d+)(?:/section/(\d+))?", c)
+    m = re.search(r"(?:irishstatutebook\.ie|revisedacts\.lawreform\.ie)"
+                  r"/eli/(\d{4})/act/(\d+)(?:/section/(\d+\w*))?/(enacted|revised)", c)
     if m:
-        year, num, sec = m.groups()
-        base = f"ie/{year}/act/{num}@enacted:en"
-        return base + (f"#sec-{sec}" if sec else "")
-    m = re.fullmatch(r"(\w+/\d{4}/\w+/\w+)(@[\w:]+)?(#[\w-]+)?", c)
+        year, num, sec, version = m.groups()
+        expr = expression_for(con, f"ie/{year}/act/{num}", version)
+        return expr + (f"#sec-{sec}" if sec else "")
+    m = re.fullmatch(r"(\w+/\d{4}/\w+/\w+)(@[\w:.-]+)?(#[\w.-]+)?", c)
     if m:
         path, version, frag = m.groups()
-        return f"{path}{version or '@enacted:en'}{frag or ''}"
+        expr = f"{path}{version}" if version else expression_for(con, path, "enacted")
+        return f"{expr}{frag or ''}"
     m = re.search(r"(?:^|\b)(?:s\.?|section)\s*(\d+\w*)\s+(?:of\s+(?:the\s+)?)?(.+)", c,
                   re.IGNORECASE)
     sec, name = (m.group(1), m.group(2).strip()) if m else (None, c)
@@ -242,7 +285,7 @@ def resolve(con, citation):
             continue
         if name_key and name_key not in title.upper() and name_key != acronym(title):
             continue
-        expr = f"{work_id}@enacted:en"
+        expr = expression_for(con, work_id, "enacted")
         return expr + (f"#sec-{sec}" if sec else "")
     sys.exit(f"cannot resolve {citation!r}")
 
@@ -287,6 +330,15 @@ def cmd_status(con, ident):
         print(f"attested:   {att[0]}  parser {att[2]}\nraw_sha256: {att[1]}")
         print(f"checks:     {att[3]}")
 
+def cmd_versions(con, work_path):
+    rows = con.execute("SELECT id, content_hash, ingested_at, source_url FROM"
+                       " expressions WHERE work_id = ? ORDER BY version",
+                       (work_path,)).fetchall()
+    if not rows:
+        sys.exit(f"no expressions ingested for {work_path!r}")
+    for eid, h, at, url in rows:
+        print(f"{eid}\n  hash {h[:16]}…  ingested {at}\n  {url}")
+
 def cmd_quote(con, fid, text):
     _, _, body, _, _ = get_fragment(con, fid)
     needle, hay = quote_normal(text), quote_normal(body)
@@ -330,6 +382,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ingest").add_argument("work")
     sub.add_parser("resolve").add_argument("citation")
+    sub.add_parser("versions").add_argument("work")
     sub.add_parser("text").add_argument("id")
     sub.add_parser("status").add_argument("id")
     q = sub.add_parser("quote"); q.add_argument("id"); q.add_argument("text")
@@ -341,6 +394,8 @@ def main():
         ingest(con, args.work)
     elif args.cmd == "resolve":
         print(resolve(con, args.citation))
+    elif args.cmd == "versions":
+        cmd_versions(con, args.work)
     elif args.cmd == "text":
         cmd_text(con, args.id)
     elif args.cmd == "status":

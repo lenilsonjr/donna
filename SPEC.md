@@ -40,6 +40,7 @@ hashes.
 | `status <id>` | Print provenance: source URL, hashes, ingestion attestation, structure-check results. |
 | `quote <fragment-id> <text>` | Exit 0 iff the text appears verbatim (typographic normalization only) in the fragment; else exit 1 and point at the nearest match. The claim-verification primitive. |
 | `search <query>` | Ranked fragments via lexical FTS. |
+| `versions <work-path>` | List every Expression of a Work: version, content hash, ingest time, source. |
 | `diff <id> <id>` | Unified diff of two Fragments' canonical text. |
 
 ## v0 acceptance criteria (tracer bullet, Ireland)
@@ -64,6 +65,28 @@ hashes.
   hashes. Verification: ingest twice, compare `status` output.
 - **AC8** This page MUST document the model and criteria; the repo MUST carry
   the work as commits. Verification: inspection.
+
+## M2 acceptance criteria (second Expression, revised Ireland)
+
+- **AC9** `donna ingest ie/2018/act/7@revised` MUST ingest the Law Reform
+  Commission Revised Act XML as a second Expression of the same Work, with the
+  revision date parsed from the source in the Expression id
+  (`@revised-YYYY-MM-DD:en`). Verification: `donna versions ie/2018/act/7`
+  lists both Expressions.
+- **AC10** Canonical fragment text MUST exclude the LRC editorial apparatus
+  (`div.annotations`); the stripped annotation count MUST be recorded in the
+  Attestation. Verification: attestation checks and `text` output.
+- **AC11** `donna diff` between the enacted and revised Expression of an
+  amended section MUST show the amendment without whitespace-only noise.
+  Verification: diff of a section amended since 2018.
+- **AC12** Sections present only in the revised Expression (inserted, lettered)
+  MUST appear as Fragments. Verification: fragment ids present in the revised
+  Expression and absent from the enacted one.
+
+The LRC's amendment markers and annotation blocks ride on editorial elements
+(`fn`, `marker`, `div.annotations`); the adapter strips them all, so canonical
+revised text is clean consolidated law. Stripped counts are recorded in the
+Attestation.
 
 ## Open questions
 
