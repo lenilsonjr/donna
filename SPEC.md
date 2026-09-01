@@ -88,6 +88,26 @@ The LRC's amendment markers and annotation blocks ride on editorial elements
 revised text is clean consolidated law. Stripped counts are recorded in the
 Attestation.
 
+## M3 acceptance criteria (Portugal, second jurisdiction)
+
+- **AC13** `donna ingest pt/1988/dec-lei/442-b@consolidated` MUST ingest the
+  CIRC (Código do IRC) from Portal das Finanças as Expression
+  `@consolidated:pt`: index-driven, one fetched page per article, Tier B
+  recorded in the Attestation together with the page count. Verification:
+  ingest output and `donna status`.
+- **AC14** `donna resolve "art. 66.º CIRC"` MUST return the art. 66.º fragment
+  id, handling Portuguese citation forms, the ordinal marker and work aliases.
+  Verification: resolve output.
+- **AC15** `donna quote` MUST verify a verbatim passage of art. 66.º and
+  reject a tampered variant, exercising Portuguese text and accents.
+  Verification: both invocations.
+
+Tier B works are configured, not discovered: the adapter carries a source map
+per Work (index URL, page slug, title, aliases). The tax authority's gray
+redaction attributions (`em` elements, "Redação da Lei n.º …") are editorial
+and are stripped and counted; statutory status text such as "(Revogado.)"
+stays.
+
 ## Open questions
 
 - **Q1** Which signing scheme anchors Attestations? Branch A: none, hashes only
@@ -102,6 +122,9 @@ Attestation.
   release artifacts, or a fetchable API only?
 - **Q4** What license does the project ship under?
 - **Q5** Which organization/namespace publishes the repos?
+- **Q6** Which Expression does a human citation resolve to when a Work has
+  several - most current, or enacted? Interim rule: enacted when present,
+  otherwise the Work's only Expression; revisit at M4.
 
 ## Milestones
 

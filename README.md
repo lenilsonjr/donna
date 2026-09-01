@@ -24,8 +24,11 @@ the model (FRBR Works/Expressions/Fragments, ELI-aligned ids, adapter tiers,
 trust chain) and the roadmap (Revised Acts diffing, Portugal DRE adapter, MCP
 server, attestation signing).
 
-Status: M2 - Ireland (eISB + Law Reform Commission, both Tier-A XML), one act
-in two Expressions (enacted and revised). `donna diff` shows real amendment
-history; the same quote verifies against the revised text and fails against
-the enacted text with a pointer to what the law used to say. All acceptance
-criteria in `SPEC.md` passing.
+Status: M3 - two jurisdictions, three Expressions. Ireland: DPA 2018 enacted
+(eISB) and revised (Law Reform Commission), both Tier-A XML; `donna diff`
+shows real amendment history and the same quote verifies against revised
+while failing against enacted. Portugal: the CIRC (Código do IRC) from Portal
+das Finanças, Tier B, 171 articles, index-driven with one page per article;
+`donna resolve "art. 66.º CIRC"` lands on the CFC article and quote
+verification catches a tampered ownership threshold. All acceptance criteria
+in `SPEC.md` passing.
