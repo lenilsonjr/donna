@@ -19,6 +19,7 @@ $DONNA search "<terms>"                   # lexical FTS
 $DONNA status "<id>"                      # source URL, hashes, attestation
 $DONNA versions <work-path>               # Expressions of a Work
 $DONNA diff "<id-a>" "<id-b>"             # e.g. enacted vs revised section
+$DONNA verify "<expression-id>"           # recompute hashes + check sshsig
 ```
 
 Add `--json` before the verb for machine-readable output (same exit codes).

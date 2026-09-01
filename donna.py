@@ -18,7 +18,8 @@ Usage:
 
 All ids follow {jur}/{year}/{type}/{num}@{version}:{lang}#{fragment}.
 """
-import argparse, difflib, hashlib, html, json, re, sqlite3, sys, time, unicodedata
+import argparse, difflib, hashlib, html, json, os, re, sqlite3, subprocess
+import sys, tempfile, time, unicodedata
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -59,6 +60,10 @@ def db_open(path):
         con.executescript(FTS)
     except sqlite3.OperationalError:
         HAS_FTS = False
+    cols = {r[1] for r in con.execute("PRAGMA table_info(attestations)")}
+    for c in ("payload_json", "signature", "signer"):
+        if c not in cols:
+            con.execute(f"ALTER TABLE attestations ADD COLUMN {c} TEXT")
     return con
 
 # ---------------------------------------------------------------- canonical text
@@ -89,6 +94,46 @@ def numbering_gaps(numbers):
         if b not in (a, a + 1):
             gaps.append(f"{a}->{b}")
     return gaps
+
+# ---------------------------------------------------------------- signing
+
+KEY_DIR = ".donna"  # set from --db location in main()
+SIG_NAMESPACE = "donna-attestation"
+
+def _key_paths():
+    return (os.path.join(KEY_DIR, "ingester_key"),
+            os.path.join(KEY_DIR, "ingester_key.pub"))
+
+def sign_payload(payload):
+    """-> (sshsig, signer pubkey) or (None, None) when no ingester key exists."""
+    key, pub = _key_paths()
+    if not os.path.exists(key):
+        return None, None
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "payload")
+        with open(p, "wb") as fh:
+            fh.write(payload)
+        subprocess.run(["ssh-keygen", "-Y", "sign", "-f", key,
+                        "-n", SIG_NAMESPACE, "-q", p],
+                       check=True, capture_output=True)
+        with open(p + ".sig") as fh:
+            sig = fh.read()
+    with open(pub) as fh:
+        kt_b64 = " ".join(fh.read().split()[:2])
+    return sig, kt_b64
+
+def verify_signature(payload, sig, signer):
+    with tempfile.TemporaryDirectory() as td:
+        allowed = os.path.join(td, "allowed_signers")
+        sigf = os.path.join(td, "payload.sig")
+        with open(allowed, "w") as fh:
+            fh.write(f"donna-ingester {signer}\n")
+        with open(sigf, "w") as fh:
+            fh.write(sig)
+        r = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", allowed,
+                            "-I", "donna-ingester", "-n", SIG_NAMESPACE,
+                            "-s", sigf], input=payload, capture_output=True)
+    return r.returncode == 0, (r.stderr or r.stdout).decode().strip()
 
 # ---------------------------------------------------------------- Ireland adapter
 
@@ -392,11 +437,22 @@ def ingest(con, work_path):
             con.execute("DELETE FROM fragments_fts WHERE id LIKE ?", (expr_id + "#%",))
             con.executemany("INSERT INTO fragments_fts VALUES (?,?,?)",
                             [(r[0], r[4], r[5]) for r in frag_rows])
+        payload = json.dumps(
+            {"expression_id": expr_id, "source_url": res["source_url"],
+             "fetched_at": fetched_at, "raw_sha256": sha256(res["raw"]),
+             "content_hash": expr_hash, "parser": res["parser"],
+             "checks": res["checks"]},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        sig, signer = sign_payload(payload.encode())
         con.execute("INSERT INTO attestations(expression_id, source_url, fetched_at,"
-                    " raw_sha256, parser, checks_json) VALUES (?,?,?,?,?,?)",
+                    " raw_sha256, parser, checks_json, payload_json, signature,"
+                    " signer) VALUES (?,?,?,?,?,?,?,?,?)",
                     (expr_id, res["source_url"], fetched_at, sha256(res["raw"]),
-                     res["parser"], json.dumps(res["checks"], ensure_ascii=False)))
+                     res["parser"], json.dumps(res["checks"], ensure_ascii=False),
+                     payload, sig, signer))
     print(f"{expr_id}  {res['work_meta']['title']}")
+    print("attestation: signed (sshsig)" if sig else
+          "attestation: UNSIGNED — run 'donna keygen' to sign future ingests")
     print(f"fragments: {len(frag_rows)}  expression_hash: {expr_hash[:16]}…")
     print(f"checks: {json.dumps(res['checks'], ensure_ascii=False)}")
     if res["checks"].get("numbering_gaps") or res["checks"].get("empty_fragments"):
@@ -551,6 +607,32 @@ def q_diff(con, a, b):
                                     fromfile=a, tofile=b, lineterm=""))
     return {"a": a, "b": b, "identical": not out, "diff": "\n".join(out)}
 
+def q_verify(con, expr_id):
+    expr = con.execute("SELECT content_hash FROM expressions WHERE id = ?",
+                       (expr_id,)).fetchone()
+    if not expr:
+        raise DonnaError(f"unknown expression {expr_id!r}")
+    rows = con.execute("SELECT id, text, content_hash FROM fragments WHERE"
+                       " expression_id = ? ORDER BY ord", (expr_id,)).fetchall()
+    mismatches = [fid for fid, text, h in rows if sha256(text) != h]
+    expr_ok = sha256("\n".join(h for _, _, h in rows)) == expr[0]
+    att_row = con.execute("SELECT payload_json, signature, signer FROM attestations"
+                          " WHERE expression_id = ? ORDER BY id DESC",
+                          (expr_id,)).fetchone()
+    att = {"present": bool(att_row), "signed": False}
+    if att_row and att_row[0]:
+        att["payload_matches_corpus"] = \
+            json.loads(att_row[0]).get("content_hash") == expr[0]
+        if att_row[1]:
+            ok, detail = verify_signature(att_row[0].encode(), att_row[1], att_row[2])
+            att.update(signed=True, signature_ok=ok, detail=detail)
+    ok = (not mismatches and expr_ok
+          and att.get("payload_matches_corpus", True)
+          and att.get("signature_ok", True))
+    return {"expression": expr_id, "ok": ok, "fragments_checked": len(rows),
+            "fragment_mismatches": mismatches, "expression_hash_ok": expr_ok,
+            "attestation": att}
+
 # ---------------------------------------------------------------- mcp server
 
 MCP_VERSION = "donna/0.4.0"
@@ -587,6 +669,11 @@ MCP_TOOLS = [
     {"name": "donna_search",
      "description": "Lexical full-text search over ingested fragments.",
      "inputSchema": _S("query", "search terms")},
+    {"name": "donna_verify",
+     "description": "Recompute every fragment hash and the expression hash for"
+                    " an Expression, compare against the stored corpus, and"
+                    " check the ingestion attestation's sshsig signature.",
+     "inputSchema": _S("expression", "expression id to verify")},
     {"name": "donna_diff",
      "description": "Unified diff of two fragments' canonical text (e.g. the same"
                     " section across enacted and revised Expressions).",
@@ -610,6 +697,8 @@ def _mcp_dispatch(con, name, args):
         return q_search(con, args["query"])
     if name == "donna_diff":
         return q_diff(con, args["a"], args["b"])
+    if name == "donna_verify":
+        return q_verify(con, args["expression"])
     raise DonnaError(f"unknown tool {name!r}")
 
 def cmd_mcp(con):
@@ -688,7 +777,21 @@ def main():
     sub.add_parser("search").add_argument("query")
     d = sub.add_parser("diff"); d.add_argument("a"); d.add_argument("b")
     sub.add_parser("mcp")
+    sub.add_parser("keygen")
+    sub.add_parser("verify").add_argument("expression")
     args = ap.parse_args()
+    global KEY_DIR
+    KEY_DIR = os.path.join(os.path.dirname(os.path.abspath(args.db)), ".donna")
+    if args.cmd == "keygen":
+        key, _ = _key_paths()
+        if os.path.exists(key):
+            print(f"key already exists at {key}", file=sys.stderr)
+            sys.exit(1)
+        os.makedirs(KEY_DIR, exist_ok=True)
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", key, "-N", "",
+                        "-C", "donna-ingester", "-q"], check=True)
+        print(f"ingester key created: {key}")
+        return
     con = db_open(args.db)
     if args.cmd == "ingest":
         ingest(con, args.work)
@@ -711,6 +814,8 @@ def main():
             out = q_search(con, args.query)
         elif args.cmd == "diff":
             out = q_diff(con, args.a, args.b)
+        elif args.cmd == "verify":
+            out = q_verify(con, args.expression)
     except DonnaError as e:
         if args.json:
             print(json.dumps({"error": str(e)}, ensure_ascii=False))
@@ -722,6 +827,8 @@ def main():
         if args.cmd == "quote" and not out["verified"]:
             sys.exit(1)
         if args.cmd == "search" and not out["results"]:
+            sys.exit(1)
+        if args.cmd == "verify" and not out["ok"]:
             sys.exit(1)
         return
     if args.cmd == "resolve":
@@ -750,6 +857,19 @@ def main():
             sys.exit("no matches")
     elif args.cmd == "diff":
         print(out["diff"] or "identical")
+    elif args.cmd == "verify":
+        a = out["attestation"]
+        state = ("signature ok" if a.get("signature_ok")
+                 else "signed, SIGNATURE FAILED" if a.get("signed")
+                 else "unsigned")
+        print(f"{out['expression']}\n  fragments: {out['fragments_checked']}"
+              f" checked, {len(out['fragment_mismatches'])} mismatched\n"
+              f"  expression hash: {'ok' if out['expression_hash_ok'] else 'MISMATCH'}\n"
+              f"  attestation: {state}")
+        if out["fragment_mismatches"]:
+            print("  mismatched: " + ", ".join(out["fragment_mismatches"]))
+        if not out["ok"]:
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -124,13 +124,33 @@ stays.
   harness to drive the CLI: corpus contents, verb contract, ingest etiquette.
   Verification: inspection; a symlink into `~/.claude/skills` makes it live.
 
+## M5 acceptance criteria (attestation signing)
+
+- **AC19** `donna keygen` MUST create an Ed25519 ingester keypair (OpenSSH
+  format, mode 0600) at `.donna/ingester_key`, refusing to overwrite an
+  existing one. Verification: run twice, inspect.
+- **AC20** ingest MUST store a canonical attestation payload (expression id,
+  source URL, fetch time, raw hash, expression hash, parser, checks) and,
+  when the ingester key exists, an sshsig signature over it plus the signer
+  public key. Ingest without a key MUST still work and record the attestation
+  as unsigned. Verification: `donna status` shows the signed state; the
+  attestation row carries payload and signature.
+- **AC21** `donna verify <expression-id>` MUST recompute every fragment hash
+  and the expression hash from the stored corpus, compare them to the
+  recorded values, and check the attestation signature; any mismatch MUST
+  exit 1 naming the failing fragment or check. The MCP server MUST expose it
+  as donna_verify. Verification: clean pass on the real corpus; a corrupted
+  fragment row in a scratch copy fails; a tampered payload fails signature
+  verification.
+
 ## Open questions
 
-- **Q1** Which signing scheme anchors Attestations? Branch A: none, hashes only
-  (cost: trust rests on the serving host; default for v0). Branch B: minisign
-  keypair per ingester (cheap, no infrastructure). Branch C: sigstore +
-  transparency log (real quorum trust, heavy). Default if unanswered at M5
-  build start: B.
+- **Q1** ANSWERED at M5 build start (2026-09-01): sshsig - `ssh-keygen -Y`
+  signatures with an Ed25519 ingester key, namespace `donna-attestation`.
+  Same cryptography as branch B (minisign) through a tool every target
+  machine already ships, keeping the no-dependency rule; verifiable with
+  stock OpenSSH >= 8.1. Branch C (sigstore + transparency log) remains the
+  upgrade path for quorum trust.
 - **Q2** How are embeddings served? Branch A: not at all, FTS only (default for
   v0). Branch B: published derived index with a model attestation (which model,
   which corpus hash). C: computed client-side by consumers. Default at M6: B.

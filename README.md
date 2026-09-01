@@ -28,7 +28,11 @@ drive it directly; `SKILL.md` teaches them how), `--json` makes every read
 verb machine-readable, and `donna mcp` serves the read verbs as MCP tools
 over stdio for hosts without a shell. `ingest` stays CLI-only by design.
 
-Status: M4 - two jurisdictions, three Expressions, three agent surfaces. Ireland: DPA 2018 enacted
+Status: M5 - two jurisdictions, three Expressions, three agent surfaces,
+signed attestations. Every ingest signs a canonical attestation payload with
+an Ed25519 ingester key (sshsig, `ssh-keygen -Y`); `donna verify` recomputes
+every hash from the stored corpus and checks the signature, so a tampered
+fragment is named exactly and a doctored attestation fails verification. Ireland: DPA 2018 enacted
 (eISB) and revised (Law Reform Commission), both Tier-A XML; `donna diff`
 shows real amendment history and the same quote verifies against revised
 while failing against enacted. Portugal: the CIRC (Código do IRC) from Portal
