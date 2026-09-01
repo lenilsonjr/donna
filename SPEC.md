@@ -143,6 +143,19 @@ stays.
   fragment row in a scratch copy fails; a tampered payload fails signature
   verification.
 
+## M7 acceptance criteria (change detection)
+
+- **AC22** `donna check <work-path[@version]>` MUST re-acquire the source
+  without writing anything, and report `source_changed` (raw bytes hash vs
+  the latest attestation) and `content_changed` (recomputed expression hash
+  vs the stored Expression) separately - cosmetic page churn must not read
+  as a law change. Exit 0 when content is unchanged, 2 when it changed, 1 on
+  error. Verification: run against all three Expressions; the Portal das
+  Finanças pages demonstrate cosmetic churn (footer date) with content
+  unchanged.
+- **AC23** The CLI form MUST honor `--json` and the MCP server MUST expose
+  donna_check. Verification: parsed JSON output and a scripted MCP call.
+
 ## Open questions
 
 - **Q1** ANSWERED at M5 build start (2026-09-01): sshsig - `ssh-keygen -Y`
@@ -154,6 +167,10 @@ stays.
 - **Q2** How are embeddings served? Branch A: not at all, FTS only (default for
   v0). Branch B: published derived index with a model attestation (which model,
   which corpus hash). C: computed client-side by consumers. Default at M6: B.
+  M6 blocked pending an answer (2026-09-01): branch B needs an embedding
+  model, and the build machine has no local runtime (no ollama) - so the
+  choice is donna's first dependency (local model) or an API key and per-call
+  cost (hosted embeddings). Owner decision.
 - **Q3** How is the corpus distributed - git-tracked data files, GitHub
   release artifacts, or a fetchable API only?
 - **Q4** What license does the project ship under?
@@ -171,8 +188,11 @@ agent surfaces - `--json` on read verbs, a stdio MCP shim over the same
 functions (read-only), and a SKILL.md for shell-capable harnesses; the CLI
 stays canonical and MCP is a distribution format, not the architecture.
 M5: attestation signing (Q1).
-M6: derived embedding index (Q2). Later milestones are shells on purpose;
-detail lands when a milestone unblocks.
+M6: derived embedding index (Q2; blocked pending the Q2 answer). M7: change
+feed - `donna check` re-acquires an Expression's source without writing and
+reports source-level vs content-level change against the stored corpus; the
+seed of watch/subscriptions. M7 proceeds while M6 awaits Q2. Later
+milestones are shells on purpose; detail lands when a milestone unblocks.
 
 ## Suggested technical approach
 

@@ -68,6 +68,9 @@ def db_open(path):
 
 # ---------------------------------------------------------------- canonical text
 
+class DonnaError(Exception):
+    """Verb-level failure surfaced as exit 1 on the CLI, isError over MCP."""
+
 def sha256(data):
     return hashlib.sha256(data if isinstance(data, bytes) else data.encode()).hexdigest()
 
@@ -400,31 +403,41 @@ ADAPTERS = {"ie": ie_acquire, "pt": pt_acquire}
 
 # ---------------------------------------------------------------- ingest
 
-def ingest(con, work_path):
+def _acquire(work_path):
     m = re.fullmatch(r"([\w-]+)/(\d{4})/([\w-]+)/([\w-]+)"
                      r"(?:@(enacted|revised|consolidated))?", work_path)
     if not m:
-        sys.exit(f"work path must look like ie/2018/act/7[@revised], got {work_path!r}")
+        raise DonnaError(f"work path must look like ie/2018/act/7[@revised],"
+                         f" got {work_path!r}")
     jur, year, wtype, num, version = m.groups()
     version = version or "enacted"
     adapter = ADAPTERS.get(jur)
     if not adapter:
-        sys.exit(f"no adapter for jurisdiction {jur!r} (have: {', '.join(ADAPTERS)})")
-    res = adapter(year, wtype, num, version)
+        raise DonnaError(f"no adapter for jurisdiction {jur!r}"
+                         f" (have: {', '.join(ADAPTERS)})")
+    return f"{jur}/{year}/{wtype}/{num}", version, adapter(year, wtype, num, version)
+
+def _expression_hashes(fragments):
+    frag_hashes = [sha256(f["text"]) for f in fragments]
+    return frag_hashes, sha256("\n".join(frag_hashes))
+
+def ingest(con, work_path):
+    try:
+        work_id, version, res = _acquire(work_path)
+    except DonnaError as e:
+        sys.exit(str(e))
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    work_id = f"{jur}/{year}/{wtype}/{num}"
     expr_id = f"{work_id}@{res['label']}:{res['lang']}"
-    frag_rows, frag_hashes = [], []
-    for i, f in enumerate(res["fragments"]):
+    frag_hashes, expr_hash = _expression_hashes(res["fragments"])
+    frag_rows = []
+    for i, (f, h) in enumerate(zip(res["fragments"], frag_hashes)):
         fid = f"{expr_id}#{KIND_PREFIX[f['kind']]}-{f['number']}"
-        h = sha256(f["text"])
-        frag_hashes.append(h)
         frag_rows.append((fid, expr_id, f["kind"], f["number"], f["heading"],
                           f["text"], i, h))
-    expr_hash = sha256("\n".join(frag_hashes))
 
     with con:
+        jur, year, wtype, num = work_id.split("/")
         con.execute("INSERT OR REPLACE INTO works VALUES (?,?,?,?,?,?,?)",
                     (work_id, jur, wtype, int(year), num,
                      res["work_meta"]["title"], res["work_meta"]["aliases"]))
@@ -459,9 +472,6 @@ def ingest(con, work_path):
         print("NOTE: structure checks recorded gaps or empty fragments", file=sys.stderr)
 
 # ---------------------------------------------------------------- resolve
-
-class DonnaError(Exception):
-    """Verb-level failure surfaced as exit 1 on the CLI, isError over MCP."""
 
 def acronym(title):
     words = [w for w in re.split(r"\W+", title) if w and not w.isdigit()
@@ -633,6 +643,26 @@ def q_verify(con, expr_id):
             "fragment_mismatches": mismatches, "expression_hash_ok": expr_ok,
             "attestation": att}
 
+def q_check(con, work_path):
+    work_id, version, res = _acquire(work_path)
+    row = con.execute("SELECT id, content_hash FROM expressions WHERE work_id = ?"
+                      " AND version LIKE ? ORDER BY version DESC",
+                      (work_id, version + "%")).fetchone()
+    if not row:
+        raise DonnaError(f"no {version} expression ingested for {work_id!r}"
+                         " — nothing to compare against")
+    stored_id, stored_hash = row
+    _, expr_hash = _expression_hashes(res["fragments"])
+    att = con.execute("SELECT raw_sha256 FROM attestations WHERE expression_id = ?"
+                      " ORDER BY id DESC", (stored_id,)).fetchone()
+    raw_now = sha256(res["raw"])
+    new_id = f"{work_id}@{res['label']}:{res['lang']}"
+    return {"work": work_id, "expression": stored_id,
+            "source_changed": bool(att) and att[0] != raw_now,
+            "content_changed": expr_hash != stored_hash,
+            "stored_hash": stored_hash, "current_hash": expr_hash,
+            "new_expression_id": new_id if new_id != stored_id else None}
+
 # ---------------------------------------------------------------- mcp server
 
 MCP_VERSION = "donna/0.4.0"
@@ -674,6 +704,12 @@ MCP_TOOLS = [
                     " an Expression, compare against the stored corpus, and"
                     " check the ingestion attestation's sshsig signature.",
      "inputSchema": _S("expression", "expression id to verify")},
+    {"name": "donna_check",
+     "description": "Re-fetch an Expression's source (network) and report"
+                    " whether the law changed: content_changed compares"
+                    " recomputed canonical hashes (definitive), source_changed"
+                    " compares raw bytes (cosmetic page churn also trips it).",
+     "inputSchema": _S("work", "work path, e.g. ie/2018/act/7[@revised]")},
     {"name": "donna_diff",
      "description": "Unified diff of two fragments' canonical text (e.g. the same"
                     " section across enacted and revised Expressions).",
@@ -699,6 +735,8 @@ def _mcp_dispatch(con, name, args):
         return q_diff(con, args["a"], args["b"])
     if name == "donna_verify":
         return q_verify(con, args["expression"])
+    if name == "donna_check":
+        return q_check(con, args["work"])
     raise DonnaError(f"unknown tool {name!r}")
 
 def cmd_mcp(con):
@@ -779,6 +817,7 @@ def main():
     sub.add_parser("mcp")
     sub.add_parser("keygen")
     sub.add_parser("verify").add_argument("expression")
+    sub.add_parser("check").add_argument("work")
     args = ap.parse_args()
     global KEY_DIR
     KEY_DIR = os.path.join(os.path.dirname(os.path.abspath(args.db)), ".donna")
@@ -816,6 +855,8 @@ def main():
             out = q_diff(con, args.a, args.b)
         elif args.cmd == "verify":
             out = q_verify(con, args.expression)
+        elif args.cmd == "check":
+            out = q_check(con, args.work)
     except DonnaError as e:
         if args.json:
             print(json.dumps({"error": str(e)}, ensure_ascii=False))
@@ -830,6 +871,8 @@ def main():
             sys.exit(1)
         if args.cmd == "verify" and not out["ok"]:
             sys.exit(1)
+        if args.cmd == "check" and out["content_changed"]:
+            sys.exit(2)
         return
     if args.cmd == "resolve":
         print(out["id"])
@@ -870,6 +913,14 @@ def main():
             print("  mismatched: " + ", ".join(out["fragment_mismatches"]))
         if not out["ok"]:
             sys.exit(1)
+    elif args.cmd == "check":
+        print(f"{out['expression']}")
+        print(f"  source bytes:  {'CHANGED' if out['source_changed'] else 'unchanged'}")
+        print(f"  content:       {'CHANGED' if out['content_changed'] else 'unchanged'}")
+        if out.get("new_expression_id"):
+            print(f"  new version:   {out['new_expression_id']} — re-ingest to adopt")
+        if out["content_changed"]:
+            sys.exit(2)
 
 if __name__ == "__main__":
     main()

@@ -20,6 +20,7 @@ $DONNA status "<id>"                      # source URL, hashes, attestation
 $DONNA versions <work-path>               # Expressions of a Work
 $DONNA diff "<id-a>" "<id-b>"             # e.g. enacted vs revised section
 $DONNA verify "<expression-id>"           # recompute hashes + check sshsig
+$DONNA check <work-path[@version]>        # re-fetch source: did the law change?
 ```
 
 Add `--json` before the verb for machine-readable output (same exit codes).
@@ -50,9 +51,10 @@ rather than ingesting on your own initiative.
 
 ## Ingest etiquette
 
-`ingest` fetches from government sources (the Portugal work makes ~170
-polite requests over a couple of minutes) and rewrites that Expression's
-corpus rows. Run it only when the user asks for a (re)ingest or clearly wants
+`ingest` and `check` fetch from government sources (the Portugal work makes
+~170 polite requests over a couple of minutes); `ingest` also rewrites that
+Expression's corpus rows. `check` exits 2 when content actually changed —
+trust `content_changed`, not `source_changed` (pages churn cosmetically). Run it only when the user asks for a (re)ingest or clearly wants
 a Work added, and never inside a tight loop. Everything else works offline.
 
 ## For non-shell hosts
