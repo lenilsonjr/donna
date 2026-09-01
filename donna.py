@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 UA = "donna/0.3 (open legal corpus tool)"
-KIND_PREFIX = {"section": "sec", "schedule": "sched", "article": "art"}
+KIND_PREFIX = {"section": "sec", "schedule": "sched", "article": "art",
+               "annex": "anexo"}
 
 # ---------------------------------------------------------------- storage
 
@@ -390,11 +391,13 @@ def pt_at_acquire(cfg, version):
 
 # ---------------------------------------------------------------- PGDL adapter
 
-PGDL_PARSER = "donna-pgdl/0.4.0"
+PGDL_PARSER = "donna-pgdl/0.5.0"
 PGDL_URL = ("https://www.pgdlisboa.pt/leis/lei_mostra_articulado.php"
             "?nid={nid}&tabela=leis&ficha=1&pagina={p}")
 PGDL_HEADER = re.compile(
-    r'<td class=txt_base_b_l[^>]*>.{0,200}?Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
+    r'<td class=txt_base_b_l[^>]*>.{0,200}?'
+    r'(?:Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
+    r'|(TABELA\s+[IVX]+(?:-[A-Z])?|ANEXO(?:\s+[IVX]+)?))'
     r'\s*(?:<br>\s*([^<]*))?</td>', re.S)
 
 def _pgdl_clean(chunk, counts):
@@ -440,11 +443,17 @@ def pgdl_acquire(cfg, version):
     for page in pages:
         heads = list(PGDL_HEADER.finditer(page))
         for i, m in enumerate(heads):
-            number = m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
+            if m.group(3):  # annex/table header
+                kind = "annex"
+                number = re.sub(r"\s+", "-", m.group(3).strip().lower())
+                heading = m.group(3).strip()
+            else:
+                kind = "article"
+                number = m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
+                heading = html.unescape((m.group(4) or "").strip())
             if number in seen:
                 continue
             seen.add(number)
-            heading = html.unescape((m.group(3) or "").strip())
             end = heads[i + 1].start() if i + 1 < len(heads) else len(page)
             body = _pgdl_clean(page[m.end():end], counts)
             # PGDL appends an amendment-history footer to each article
@@ -453,11 +462,14 @@ def pgdl_acquire(cfg, version):
             if cut:
                 body = canonical(body[:cut.start()])
                 counts["hist"] = counts.get("hist", 0) + 1
-            fragments.append({"kind": "article", "number": number,
+            fragments.append({"kind": kind, "number": number,
                               "heading": heading, "text": body})
     missing = [n for n in expected if n not in seen]
-    seq = sorted({int(re.match(r"\d+", f["number"]).group(0)) for f in fragments})
-    checks = {"tier": "B", "articles": len(fragments), "pages_fetched": len(pages),
+    arts = [f for f in fragments if f["kind"] == "article"]
+    seq = sorted({int(re.match(r"\d+", f["number"]).group(0)) for f in arts})
+    checks = {"tier": "B", "articles": len(arts),
+              "annexes": len(fragments) - len(arts),
+              "pages_fetched": len(pages),
               "toc_expected": len(expected), "toc_missing": missing,
               "numbering_gaps": numbering_gaps(seq),
               "empty_fragments": [f["number"] for f in fragments if not f["text"]],
@@ -722,6 +734,18 @@ WORKS = {
         "url": "https://www.planalto.gov.br/ccivil_03/leis/l9096.htm",
         "title": "Lei dos Partidos Políticos - Lei n.º 9.096/1995",
         "aliases": "LEI DOS PARTIDOS,LEI 9096,LEI 9.096",
+    },
+    ("pt", "2018", "lei", "33"): {
+        "source": pgdl_acquire, "nid": "2918",
+        "title": "Lei da Canábis para Fins Medicinais (Lei n.º 33/2018)",
+        "aliases": "LEI DA CANABIS,LEI DA CANÁBIS,CANNABIS MEDICINAL,"
+                   "CANABIS MEDICINAL",
+    },
+    ("pt", "2019", "dec-lei", "8"): {
+        "source": pgdl_acquire, "nid": "2997",
+        "title": "Utilização de Medicamentos e Substâncias à Base da Planta"
+                 " de Canábis (DL n.º 8/2019)",
+        "aliases": "DL 8/2019,REGULAMENTO DA CANABIS",
     },
     ("pt", "1986", "lei", "44"): {
         "source": pgdl_acquire, "nid": "1712",
@@ -1016,6 +1040,54 @@ def q_check(con, work_path):
             "stored_hash": stored_hash, "current_hash": expr_hash,
             "new_expression_id": new_id if new_id != stored_id else None}
 
+def q_refs(con, scope=None):
+    """Dangling citations: acts cited by ingested fragments that are not in
+    the corpus. Deterministic discovery — the corpus points at its own gaps."""
+    PT_TYPES = {"lei": "lei", "decreto-lei": "dec-lei", "portaria": "portaria",
+                "lei orgânica": "lei-organica",
+                "decreto regulamentar": "dec-regulamentar"}
+    pt_re = re.compile(r"(Lei Orgânica|Decreto-Lei|Decreto Regulamentar|Portaria"
+                       r"|Lei)\s+n\.?[ºo°]?\s*(\d+(?:-[A-Z])?)/(\d{2,4})")
+    br_re = re.compile(r"(Lei|Decreto-Lei|Decreto)\s+n[ºo°.]*\s*([\d.]+)"
+                       r"(?:\s*,\s*de[^,.;]*?(\d{4}))?")
+    usc_re = re.compile(r"(\d+)\s+U\.S\.C\.")
+    known = {tuple(w.split("/")) for (w,) in con.execute("SELECT id FROM works")}
+    found = {}
+    q = "SELECT f.id, f.text, e.lang, e.work_id FROM fragments f JOIN" \
+        " expressions e ON e.id = f.expression_id"
+    args = ()
+    if scope:
+        q += " WHERE f.expression_id LIKE ?"
+        args = (scope + "%",)
+    for fid, text, lang, work_id in con.execute(q, args):
+        jur = work_id.split("/")[0]
+        cites = []
+        if lang == "pt":
+            for t, num, yr in pt_re.findall(text):
+                y = int(yr)
+                if y < 100:
+                    y += 1900 if y > 35 else 2000
+                cites.append((jur, str(y), PT_TYPES[t.lower()], num.lower()))
+        elif lang == "pt-BR":
+            for t, num, yr in br_re.findall(text):
+                num = num.replace(".", "").strip()
+                if not num or not yr:
+                    continue
+                cites.append((jur, yr, "lei" if t == "Lei" else "dec-lei", num))
+        elif lang == "en":
+            for title in usc_re.findall(text):
+                cites.append(("us", "1986", "usc", title))
+        for c in cites:
+            if c in known or c[:1] + c[2:] in {k[:1] + k[2:] for k in known}:
+                continue
+            entry = found.setdefault(c, {"citations": 0, "sample": fid})
+            entry["citations"] += 1
+    ranked = sorted(found.items(), key=lambda kv: -kv[1]["citations"])
+    return {"scope": scope or "corpus",
+            "missing": [{"work": "/".join(k), "citations": v["citations"],
+                         "sample_source": v["sample"]}
+                        for k, v in ranked[:25]]}
+
 # ---------------------------------------------------------------- mcp server
 
 MCP_VERSION = "donna/0.4.0"
@@ -1057,6 +1129,12 @@ MCP_TOOLS = [
                     " an Expression, compare against the stored corpus, and"
                     " check the ingestion attestation's sshsig signature.",
      "inputSchema": _S("expression", "expression id to verify")},
+    {"name": "donna_refs",
+     "description": "Discovery: acts cited by the ingested corpus that are not"
+                    " themselves ingested, ranked by citation count. Optional"
+                    " scope prefix narrows to one work/expression.",
+     "inputSchema": {"type": "object", "properties":
+                     {"scope": {"type": "string"}}}},
     {"name": "donna_check",
      "description": "Re-fetch an Expression's source (network) and report"
                     " whether the law changed: content_changed compares"
@@ -1090,6 +1168,8 @@ def _mcp_dispatch(con, name, args):
         return q_verify(con, args["expression"])
     if name == "donna_check":
         return q_check(con, args["work"])
+    if name == "donna_refs":
+        return q_refs(con, args.get("scope"))
     raise DonnaError(f"unknown tool {name!r}")
 
 def cmd_mcp(con):
@@ -1171,6 +1251,7 @@ def main():
     sub.add_parser("keygen")
     sub.add_parser("verify").add_argument("expression")
     sub.add_parser("check").add_argument("work")
+    sub.add_parser("refs").add_argument("scope", nargs="?")
     args = ap.parse_args()
     global KEY_DIR
     KEY_DIR = os.path.join(os.path.dirname(os.path.abspath(args.db)), ".donna")
@@ -1210,6 +1291,8 @@ def main():
             out = q_verify(con, args.expression)
         elif args.cmd == "check":
             out = q_check(con, args.work)
+        elif args.cmd == "refs":
+            out = q_refs(con, args.scope)
     except DonnaError as e:
         if args.json:
             print(json.dumps({"error": str(e)}, ensure_ascii=False))
@@ -1266,6 +1349,11 @@ def main():
             print("  mismatched: " + ", ".join(out["fragment_mismatches"]))
         if not out["ok"]:
             sys.exit(1)
+    elif args.cmd == "refs":
+        for r in out["missing"]:
+            print(f"{r['citations']:4}x  {r['work']}\n       e.g. cited in {r['sample_source']}")
+        if not out["missing"]:
+            print("no dangling citations found")
     elif args.cmd == "check":
         print(f"{out['expression']}")
         print(f"  source bytes:  {'CHANGED' if out['source_changed'] else 'unchanged'}")

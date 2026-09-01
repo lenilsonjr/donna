@@ -21,6 +21,7 @@ $DONNA versions <work-path>               # Expressions of a Work
 $DONNA diff "<id-a>" "<id-b>"             # e.g. enacted vs revised section
 $DONNA verify "<expression-id>"           # recompute hashes + check sshsig
 $DONNA check <work-path[@version]>        # re-fetch source: did the law change?
+$DONNA refs [scope-prefix]                # discovery: cited-but-not-ingested acts
 ```
 
 Add `--json` before the verb for machine-readable output (same exit codes).
@@ -46,10 +47,14 @@ Add `--json` before the verb for machine-readable output (same exit codes).
 - **Portugal (tax)**: `pt/1988/dec-lei/442-b` Código do IRC / CIRC
   (`@consolidated:pt`) — includes art. 66.º (CFC).
 - **Portugal (general)**: Código da Estrada `pt/1994/dec-lei/114`; Lei das
-  Armas `pt/2006/lei/5`; droga DL 15/93 `pt/1993/dec-lei/15`;
-  descriminalização Lei 30/2000 `pt/2000/lei/30`; Lei de Segurança Interna
-  `pt/2008/lei/53`; Código Penal `pt/1982/dec-lei/400`; Código de Processo
-  Penal `pt/1987/dec-lei/78`; Estado de Sítio/Emergência `pt/1986/lei/44`
+  Armas `pt/2006/lei/5` (+ weapons annex); droga DL 15/93
+  `pt/1993/dec-lei/15` **including the substance schedules as annex
+  fragments** (`#anexo-tabela-i-c` holds cannabis — the statutory spelling
+  is "Canabis", unaccented); descriminalização Lei 30/2000
+  `pt/2000/lei/30`; medical cannabis Lei 33/2018 `pt/2018/lei/33` + DL
+  8/2019 `pt/2019/dec-lei/8`; Lei de Segurança Interna `pt/2008/lei/53`;
+  Código Penal `pt/1982/dec-lei/400`; Código de Processo Penal
+  `pt/1987/dec-lei/78`; Estado de Sítio/Emergência `pt/1986/lei/44`
   (all `@consolidated:pt`, PGDL).
 - **Brazil (elections)**: Código Eleitoral `br/1965/lei/4737`; Lei das
   Eleições `br/1997/lei/9504` (doações: art. 23); Lei dos Partidos

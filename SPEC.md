@@ -183,6 +183,23 @@ stays.
   find its data API or record the blocker. Verification: resolve
   "26 USC 951A"-style citations; quote verbatim from an ingested section.
 
+## M9 acceptance criteria (annexes and discovery)
+
+- **AC28** The PGDL adapter MUST capture annex fragments (TABELA/ANEXO
+  header cells) with kind `annex`, so substance schedules and similar
+  classification assets are addressable and quotable - demo: the DL 15/93
+  drug tables (Tabela I-A ... VI), including cannabis in Tabela I-C.
+  Verification: fragments exist; quote a listed substance verbatim.
+- **AC29** The corpus MUST include Portugal's medical cannabis regime:
+  Lei n.º 33/2018 and DL n.º 8/2019. Verification: resolve and quote.
+- **AC30** `donna refs` MUST report dangling citations: legal acts cited by
+  ingested fragments that are not themselves in the corpus, ranked by
+  citation count, each mapped to a candidate work path. Deterministic - no
+  LLM. This is the discovery primitive: the corpus's own cross-references
+  say what to ingest next; relevance ranking beyond that belongs to the
+  matter layer (mike), not donna. Verification: run over the corpus; output
+  lists real uningested diplomas with counts; `--json` parses.
+
 ## Open questions
 
 - **Q1** ANSWERED at M5 build start (2026-09-01): sshsig - `ssh-keygen -Y`
