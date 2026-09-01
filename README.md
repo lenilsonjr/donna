@@ -28,7 +28,8 @@ drive it directly; `SKILL.md` teaches them how), `--json` makes every read
 verb machine-readable, and `donna mcp` serves the read verbs as MCP tools
 over stdio for hosts without a shell. `ingest` stays CLI-only by design.
 
-Status: M7 - two jurisdictions, three Expressions, three agent surfaces,
+Status: M8 - five jurisdictions (IE, PT, BR, US federal, Wyoming), 17
+Expressions, ~5,550 fragments, three agent surfaces,
 signed attestations. Every ingest signs a canonical attestation payload with
 an Ed25519 ingester key (sshsig, `ssh-keygen -Y`); `donna verify` recomputes
 every hash from the stored corpus and checks the signature, so a tampered

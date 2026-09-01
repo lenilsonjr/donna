@@ -41,13 +41,29 @@ Add `--json` before the verb for machine-readable output (same exit codes).
 
 ## Corpus currently ingested
 
-- `ie/2018/act/7` — Data Protection Act 2018: `@enacted:en` (Irish Statute
-  Book) and `@revised-2026-07-16:en` (Law Reform Commission Revised Act).
-- `pt/1988/dec-lei/442-b` — Código do IRC (CIRC), `@consolidated:pt` from
-  Portal das Finanças; includes art. 66.º (CFC / imputação de rendimentos).
+- **Ireland**: `ie/2018/act/7` Data Protection Act 2018 (`@enacted:en` and
+  `@revised-2026-07-16:en`).
+- **Portugal (tax)**: `pt/1988/dec-lei/442-b` Código do IRC / CIRC
+  (`@consolidated:pt`) — includes art. 66.º (CFC).
+- **Portugal (general)**: Código da Estrada `pt/1994/dec-lei/114`; Lei das
+  Armas `pt/2006/lei/5`; droga DL 15/93 `pt/1993/dec-lei/15`;
+  descriminalização Lei 30/2000 `pt/2000/lei/30`; Lei de Segurança Interna
+  `pt/2008/lei/53`; Código Penal `pt/1982/dec-lei/400`; Código de Processo
+  Penal `pt/1987/dec-lei/78`; Estado de Sítio/Emergência `pt/1986/lei/44`
+  (all `@consolidated:pt`, PGDL).
+- **Brazil (elections)**: Código Eleitoral `br/1965/lei/4737`; Lei das
+  Eleições `br/1997/lei/9504` (doações: art. 23); Lei dos Partidos
+  `br/1995/lei/9096` (all `@consolidated:pt-BR`, Planalto).
+- **US federal**: Internal Revenue Code `us/1986/usc/26` — 1,875 sections,
+  2023 edition via GovInfo (`@consolidated:en`); resolve accepts
+  "26 USC 951A" / "IRC § 7701".
+- **Wyoming**: Title 17 (corporations; ch. 29 = LLC Act)
+  `wy/1977/title/17`; Title 34.1 (UCC) `wy/1977/title/34-1`
+  (`@consolidated:en`); resolve accepts "W.S. 17-29-201".
 
-`versions <work>` confirms what is present. If a Work is missing, say so
-rather than ingesting on your own initiative.
+No case law anywhere, by explicit scope decision. `versions <work>` confirms
+what is present. If a Work is missing, say so rather than ingesting on your
+own initiative.
 
 ## Ingest etiquette
 

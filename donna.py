@@ -86,8 +86,12 @@ TYPOGRAPHIC = str.maketrans({"‘": "'", "’": "'", "“": '"',
 def quote_normal(text):
     return re.sub(r"\s+", " ", text.translate(TYPOGRAPHIC)).strip()
 
-def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+              " AppleWebKit/537.36 (KHTML, like Gecko)"
+              " Chrome/128.0.0.0 Safari/537.36")
+
+def fetch(url, ua=None):
+    req = urllib.request.Request(url, headers={"User-Agent": ua or UA})
     with urllib.request.urlopen(req) as r:
         return r.read()
 
@@ -242,16 +246,6 @@ def ie_acquire(year, wtype, num, version):
 
 PT_PARSER = "donna-pt/0.6.0"
 PT_BASE = "https://info.portaldasfinancas.gov.pt"
-PT_WORKS = {
-    ("1988", "dec-lei", "442-b"): {
-        "title": "Código do Imposto sobre o Rendimento das Pessoas Coletivas"
-                 " (Código do IRC)",
-        "aliases": "CIRC,CODIGO DO IRC,CÓDIGO DO IRC",
-        "index": PT_BASE + "/pt/informacao_fiscal/codigos_tributarios/CIRC_2R"
-                 "/Pages/circ-codigo-do-irc-indice.aspx",
-        "slug": "irc",
-    },
-}
 
 class _PTBlocks(HTMLParser):
     """Collects p/div text blocks from a Portal das Finanças page, dropping
@@ -349,14 +343,9 @@ def _pt_extract(html_text):
         body = em_only
     return canonical("\n".join(body)), heading, parser.em_stripped, notes
 
-def pt_acquire(year, wtype, num, version):
-    cfg = PT_WORKS.get((year, wtype, num))
-    if not cfg:
-        known = ", ".join("/".join(k) for k in PT_WORKS)
-        sys.exit(f"pt adapter has no source configured for {year}/{wtype}/{num}"
-                 f" (configured: {known})")
+def pt_at_acquire(cfg, version):
     if version != "consolidated":
-        sys.exit("pt adapter serves @consolidated only")
+        raise DonnaError("this source serves @consolidated only")
     index_raw = fetch(cfg["index"])
     index_html = index_raw.decode("utf-8", errors="replace")
     seen, pages = set(), []
@@ -399,7 +388,348 @@ def pt_acquire(year, wtype, num, version):
             "source_url": cfg["index"], "raw": b"".join(raw_parts),
             "checks": checks, "parser": PT_PARSER}
 
-ADAPTERS = {"ie": ie_acquire, "pt": pt_acquire}
+# ---------------------------------------------------------------- PGDL adapter
+
+PGDL_PARSER = "donna-pgdl/0.4.0"
+PGDL_URL = ("https://www.pgdlisboa.pt/leis/lei_mostra_articulado.php"
+            "?nid={nid}&tabela=leis&ficha=1&pagina={p}")
+PGDL_HEADER = re.compile(
+    r'<td class=txt_base_b_l[^>]*>.{0,200}?Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
+    r'\s*(?:<br>\s*([^<]*))?</td>', re.S)
+
+def _pgdl_clean(chunk, counts):
+    chunk = re.sub(r'<td class=txt_11_b_l.*?</td>',
+                   lambda m: counts.__setitem__("struct", counts["struct"] + 1) or "",
+                   chunk, flags=re.S)
+    chunk = re.sub(r'<(?:script|select|style).*?</(?:script|select|style)>', "",
+                   chunk, flags=re.S | re.I)
+    chunk = re.sub(r'<br\s*/?>', "\n", chunk, flags=re.I)
+    chunk = re.sub(r'</td>|</tr>|</p>', "\n", chunk, flags=re.I)
+    chunk = re.sub(r'<[^>]+>', "", chunk)
+    return canonical(html.unescape(chunk))
+
+def pgdl_acquire(cfg, version):
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    raws, pages = [], []
+    raw = fetch(PGDL_URL.format(nid=cfg["nid"], p=1))
+    raws.append(raw)
+    pages.append(raw.decode("iso-8859-1", errors="replace"))
+    # follow the site's own pager hrefs (ficha=, not pagina=, drives the offset)
+    pager, seen_p = [], set()
+    for m in re.finditer(r"href='(lei_mostra_articulado\.php\?[^']*nid=%s[^']*)'"
+                         % cfg["nid"], pages[0]):
+        href = m.group(1)
+        pm = re.search(r"pagina=(\d+)", href)
+        if pm and int(pm.group(1)) > 1 and pm.group(1) not in seen_p:
+            seen_p.add(pm.group(1))
+            pager.append((int(pm.group(1)), href))
+    for _, href in sorted(pager):
+        time.sleep(0.3)
+        raw = fetch("https://www.pgdlisboa.pt/leis/" + html.unescape(href))
+        raws.append(raw)
+        pages.append(raw.decode("iso-8859-1", errors="replace"))
+    expected = []
+    for m in re.finditer(r'<option value="%sA\d+">Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
+                         % cfg["nid"], pages[0]):
+        n = m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
+        if n not in expected:
+            expected.append(n)
+    counts = {"struct": 0}
+    fragments, seen = [], set()
+    for page in pages:
+        heads = list(PGDL_HEADER.finditer(page))
+        for i, m in enumerate(heads):
+            number = m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
+            if number in seen:
+                continue
+            seen.add(number)
+            heading = html.unescape((m.group(3) or "").strip())
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(page)
+            body = _pgdl_clean(page[m.end():end], counts)
+            # PGDL appends an amendment-history footer to each article
+            cut = re.search(r"Contém as alterações|Consultar versões anteriores"
+                            r"|Consultar esta disposição", body)
+            if cut:
+                body = canonical(body[:cut.start()])
+                counts["hist"] = counts.get("hist", 0) + 1
+            fragments.append({"kind": "article", "number": number,
+                              "heading": heading, "text": body})
+    missing = [n for n in expected if n not in seen]
+    seq = sorted({int(re.match(r"\d+", f["number"]).group(0)) for f in fragments})
+    checks = {"tier": "B", "articles": len(fragments), "pages_fetched": len(pages),
+              "toc_expected": len(expected), "toc_missing": missing,
+              "numbering_gaps": numbering_gaps(seq),
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]],
+              "structure_cells_stripped": counts["struct"],
+              "history_footers_stripped": counts.get("hist", 0)}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "pt",
+            "source_url": PGDL_URL.format(nid=cfg["nid"], p=1),
+            "raw": b"".join(raws), "checks": checks, "parser": PGDL_PARSER}
+
+# ---------------------------------------------------------------- Planalto adapter
+
+BR_PARSER = "donna-planalto/0.2.0"
+BR_EDITORIAL = re.compile(
+    r"\(\s*(?:Redação dada|Incluíd[oa]|Acrescid[oa]|Renumerad[oa]|Vide|"
+    r"Regulamento|Vigência|Produção de efeito)[^)]*\)", re.I)
+
+def planalto_acquire(cfg, version):
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    # planalto.gov.br resets connections from non-browser user agents
+    raw = fetch(cfg["url"], ua=BROWSER_UA)
+    page = raw.decode("windows-1252", errors="replace")
+    counts = {"strike": len(re.findall(r"<strike", page, re.I))}
+    page = re.sub(r"<strike.*?</strike>", "", page, flags=re.S | re.I)
+    page = re.sub(r"<(?:script|style).*?</(?:script|style)>", "", page,
+                  flags=re.S | re.I)
+    page = re.sub(r"</p>|<br\s*/?>", "\n", page, flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", "", page))
+    counts["editorial"] = len(BR_EDITORIAL.findall(text))
+    text = BR_EDITORIAL.sub("", text)
+    text = canonical(text)
+    # cut the signature block after the last article
+    sig = re.search(r"(?m)^Brasília,\s", text)
+    art_re = re.compile(r"(?m)^\s*Art\.?\s*(\d+)(?:º|o)?(?:-([A-Z]))?[\s.]")
+    heads = [m for m in art_re.finditer(text) if not sig or m.start() < sig.start()]
+    if not heads:
+        raise DonnaError("no articles found — page layout may have changed")
+    # laws quote other laws' articles inline; keep the longest nondecreasing
+    # chain of article numbers so out-of-place quoted headers fall out
+    keys = [(int(m.group(1)), ord(m.group(2)) if m.group(2) else 0) for m in heads]
+    best_len, prev = [1] * len(keys), [-1] * len(keys)
+    for i in range(len(keys)):
+        for j in range(i):
+            if keys[j] <= keys[i] and best_len[j] + 1 > best_len[i]:
+                best_len[i], prev[i] = best_len[j] + 1, j
+    i = max(range(len(keys)), key=lambda k: best_len[k])
+    chain = []
+    while i != -1:
+        chain.append(i)
+        i = prev[i]
+    chain.reverse()
+    quoted_skipped = len(heads) - len(chain)
+    picked = [heads[i] for i in chain]
+    fragments, seen = [], set()
+    for i, m in enumerate(picked):
+        number = m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
+        if number in seen:
+            continue
+        seen.add(number)
+        end = picked[i + 1].start() if i + 1 < len(picked) else \
+            (sig.start() if sig else len(text))
+        fragments.append({"kind": "article", "number": number, "heading": "",
+                          "text": canonical(text[m.start():end])})
+    seq = sorted({int(re.match(r"\d+", f["number"]).group(0)) for f in fragments})
+    checks = {"tier": "B", "articles": len(fragments),
+              "numbering_gaps": numbering_gaps(seq),
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]],
+              "quoted_headers_skipped": quoted_skipped,
+              "struck_blocks_stripped": counts["strike"],
+              "editorial_notes_stripped": counts["editorial"]}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "pt-BR",
+            "source_url": cfg["url"], "raw": raw,
+            "checks": checks, "parser": BR_PARSER}
+
+# ---------------------------------------------------------------- GovInfo adapter
+
+GI_PARSER = "donna-govinfo/0.2.0"
+
+def govinfo_acquire(cfg, version):
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    key = os.environ.get("GOVINFO_API_KEY", "DEMO_KEY")
+    url = f"https://api.govinfo.gov/packages/{cfg['package']}/htm?api_key={key}"
+    raw = fetch(url, ua=BROWSER_UA)
+    page = raw.decode("utf-8", errors="replace")
+    parts = re.split(
+        r'<h3 class="section-head">\s*((?:§|&sect;|&#167;)[^<]+?)\s*</h3>', page)
+    if len(parts) < 3:
+        raise DonnaError("no section-head elements — page layout may have changed")
+    cut_re = re.compile(r'class="(?:source-credit|note-head|note-body)')
+    fragments, seen, notes_cut = [], set(), 0
+    for hdr, body in zip(parts[1::2], parts[2::2]):
+        hdr = hdr.replace("&sect;", "§").replace("&#167;", "§")
+        m = re.match(r"§+\s*([0-9A-Za-z]+(?:-[0-9A-Za-z]+)?)[.,\s]*(.*)", hdr)
+        if not m:
+            continue
+        number, heading = m.group(1), html.unescape(m.group(2)).strip().rstrip("]")
+        if number in seen:
+            continue
+        seen.add(number)
+        cut = cut_re.search(body)
+        if cut:
+            notes_cut += 1
+            body = body[:cut.start()]
+        body = re.sub(r"</p>|</h4>|</tr>", "\n", body, flags=re.I)
+        body = re.sub(r"<[^>]+>", "", body)
+        fragments.append({"kind": "section", "number": number, "heading": heading,
+                          "text": canonical(html.unescape(body))})
+    checks = {"tier": "B", "sections": len(fragments),
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]],
+              "note_blocks_cut": notes_cut}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "en",
+            "source_url": url.replace(key, "<api_key>"), "raw": raw,
+            "checks": checks, "parser": GI_PARSER}
+
+# ---------------------------------------------------------------- Wyoming adapter
+
+WY_PARSER = "donna-wy-pdf/0.2.0"
+WY_BASE = "https://wyoleg.gov/statutes/compress/"
+
+def wy_pdf_acquire(cfg, version):
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    import shutil
+    if not shutil.which("pdftotext"):
+        raise DonnaError("pdftotext not found — Tier C extraction needs poppler"
+                         " (brew install poppler)")
+    raw = fetch(WY_BASE + cfg["file"], ua=BROWSER_UA)
+    with tempfile.TemporaryDirectory() as td:
+        pdf = os.path.join(td, "t.pdf")
+        with open(pdf, "wb") as fh:
+            fh.write(raw)
+        r = subprocess.run(["pdftotext", "-enc", "UTF-8", pdf, "-"],
+                           capture_output=True, check=True)
+    text = r.stdout.decode("utf-8", errors="replace").replace("\f", "\n")
+    tnum = cfg["ws_title"]
+    head_re = re.compile(r"^(%s-\d+(?:\.\d+)?-\d+)\.(?:\s+(\S.*))?$"
+                         % re.escape(tnum), re.M)
+    def key(number):
+        parts = number.split("-")
+        return tuple(float(x) if "." in x else int(x) for x in parts[1:])
+    heads = list(head_re.finditer(text))
+    picked, last = [], None
+    for m in heads:  # monotonic filter: wrapped cross-references start lines too
+        k = key(m.group(1))
+        if last is None or k >= last:
+            picked.append(m)
+            last = k
+    fragments, seen = [], set()
+    for i, m in enumerate(picked):
+        number = m.group(1)
+        if number in seen:
+            continue
+        seen.add(number)
+        end = picked[i + 1].start() if i + 1 < len(picked) else len(text)
+        chunk = text[m.end():end]
+        lines = [l for l in chunk.splitlines()]
+        heading = (m.group(2) or "").strip()
+        if not heading:
+            for j, l in enumerate(lines):
+                if l.strip():
+                    heading = l.strip()
+                    lines = lines[j + 1:]
+                    break
+        body = canonical("\n".join(lines))
+        if not body:  # repealed sections carry only their status line
+            body = heading
+        fragments.append({"kind": "section", "number": number,
+                          "heading": heading.rstrip("."), "text": body})
+    chapters = {f["number"].split("-")[1] for f in fragments}
+    checks = {"tier": "C", "extractor": "pdftotext",
+              "sections": len(fragments), "chapters": len(chapters),
+              "headers_rejected": len(heads) - len(picked),
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]]}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "en",
+            "source_url": WY_BASE + cfg["file"], "raw": raw,
+            "checks": checks, "parser": WY_PARSER}
+
+# ---------------------------------------------------------------- work registry
+
+ADAPTERS = {"ie": ie_acquire}  # pattern adapters: any Work in the jurisdiction
+
+WORKS = {
+    ("pt", "1988", "dec-lei", "442-b"): {
+        "source": pt_at_acquire,
+        "title": "Código do Imposto sobre o Rendimento das Pessoas Coletivas"
+                 " (Código do IRC)",
+        "aliases": "CIRC,CODIGO DO IRC,CÓDIGO DO IRC",
+        "index": PT_BASE + "/pt/informacao_fiscal/codigos_tributarios/CIRC_2R"
+                 "/Pages/circ-codigo-do-irc-indice.aspx",
+        "slug": "irc",
+    },
+    ("pt", "1994", "dec-lei", "114"): {
+        "source": pgdl_acquire, "nid": "349",
+        "title": "Código da Estrada (DL n.º 114/94)",
+        "aliases": "CE,CODIGO DA ESTRADA,CÓDIGO DA ESTRADA",
+    },
+    ("pt", "2006", "lei", "5"): {
+        "source": pgdl_acquire, "nid": "692",
+        "title": "Regime Jurídico das Armas e Munições (Lei n.º 5/2006)",
+        "aliases": "LEI DAS ARMAS,RJAM,LEI 5/2006",
+    },
+    ("pt", "1993", "dec-lei", "15"): {
+        "source": pgdl_acquire, "nid": "181",
+        "title": "Legislação de Combate à Droga (DL n.º 15/93)",
+        "aliases": "LEI DA DROGA,DL 15/93",
+    },
+    ("pt", "2000", "lei", "30"): {
+        "source": pgdl_acquire, "nid": "186",
+        "title": "Regime Jurídico do Consumo de Estupefacientes (Lei n.º 30/2000)",
+        "aliases": "LEI 30/2000,DESCRIMINALIZACAO,DESCRIMINALIZAÇÃO",
+    },
+    ("pt", "2008", "lei", "53"): {
+        "source": pgdl_acquire, "nid": "1012",
+        "title": "Lei de Segurança Interna (Lei n.º 53/2008)",
+        "aliases": "LSI,LEI DE SEGURANCA INTERNA,LEI DE SEGURANÇA INTERNA",
+    },
+    ("pt", "1982", "dec-lei", "400"): {
+        "source": pgdl_acquire, "nid": "109",
+        "title": "Código Penal (DL n.º 400/82)",
+        "aliases": "CP,CODIGO PENAL,CÓDIGO PENAL",
+    },
+    ("pt", "1987", "dec-lei", "78"): {
+        "source": pgdl_acquire, "nid": "199",
+        "title": "Código de Processo Penal (DL n.º 78/87)",
+        "aliases": "CPP,CODIGO DE PROCESSO PENAL,CÓDIGO DE PROCESSO PENAL",
+    },
+    ("wy", "1977", "title", "17"): {
+        "source": wy_pdf_acquire, "file": "title17.pdf", "ws_title": "17",
+        "title": "Wyoming Statutes Title 17 - Corporations, Partnerships and"
+                 " Associations (incl. ch. 29, Wyoming LLC Act)",
+        "aliases": "WYOMING LLC ACT,WY TITLE 17,WS TITLE 17",
+    },
+    ("wy", "1977", "title", "34-1"): {
+        "source": wy_pdf_acquire, "file": "title34.1.pdf", "ws_title": "34.1",
+        "title": "Wyoming Statutes Title 34.1 - Uniform Commercial Code",
+        "aliases": "WYOMING UCC,UCC,WY TITLE 34.1",
+    },
+    ("us", "1986", "usc", "26"): {
+        "source": govinfo_acquire, "package": "USCODE-2023-title26",
+        "title": "Internal Revenue Code - 26 U.S.C. (2023 edition, GovInfo)",
+        "aliases": "IRC,26 USC,INTERNAL REVENUE CODE,US TAX CODE",
+    },
+    ("br", "1965", "lei", "4737"): {
+        "source": planalto_acquire,
+        "url": "https://www.planalto.gov.br/ccivil_03/leis/l4737compilado.htm",
+        "title": "Código Eleitoral - Lei n.º 4.737/1965",
+        "aliases": "CODIGO ELEITORAL,CÓDIGO ELEITORAL,LEI 4737,LEI 4.737",
+    },
+    ("br", "1997", "lei", "9504"): {
+        "source": planalto_acquire,
+        "url": "https://www.planalto.gov.br/ccivil_03/leis/l9504.htm",
+        "title": "Lei das Eleições - Lei n.º 9.504/1997",
+        "aliases": "LEI DAS ELEICOES,LEI DAS ELEIÇÕES,LEI 9504,LEI 9.504",
+    },
+    ("br", "1995", "lei", "9096"): {
+        "source": planalto_acquire,
+        "url": "https://www.planalto.gov.br/ccivil_03/leis/l9096.htm",
+        "title": "Lei dos Partidos Políticos - Lei n.º 9.096/1995",
+        "aliases": "LEI DOS PARTIDOS,LEI 9096,LEI 9.096",
+    },
+    ("pt", "1986", "lei", "44"): {
+        "source": pgdl_acquire, "nid": "1712",
+        "title": "Regime do Estado de Sítio e do Estado de Emergência"
+                 " (Lei n.º 44/86)",
+        "aliases": "ESTADO DE EMERGENCIA,ESTADO DE EMERGÊNCIA,ESTADO DE SITIO",
+    },
+}
 
 # ---------------------------------------------------------------- ingest
 
@@ -410,12 +740,18 @@ def _acquire(work_path):
         raise DonnaError(f"work path must look like ie/2018/act/7[@revised],"
                          f" got {work_path!r}")
     jur, year, wtype, num, version = m.groups()
-    version = version or "enacted"
+    work_id = f"{jur}/{year}/{wtype}/{num}"
+    cfg = WORKS.get((jur, year, wtype, num))
+    if cfg:
+        version = version or "consolidated"
+        return work_id, version, cfg["source"](cfg, version)
     adapter = ADAPTERS.get(jur)
     if not adapter:
-        raise DonnaError(f"no adapter for jurisdiction {jur!r}"
-                         f" (have: {', '.join(ADAPTERS)})")
-    return f"{jur}/{year}/{wtype}/{num}", version, adapter(year, wtype, num, version)
+        known = ", ".join("/".join(k) for k in WORKS)
+        raise DonnaError(f"no adapter for jurisdiction {jur!r} and no configured"
+                         f" work {work_id!r} (configured: {known})")
+    version = version or "enacted"
+    return work_id, version, adapter(year, wtype, num, version)
 
 def _expression_hashes(fragments):
     frag_hashes = [sha256(f["text"]) for f in fragments]
@@ -513,6 +849,23 @@ def q_resolve(con, citation):
         path, version, frag = m.groups()
         expr = f"{path}{version}" if version else expression_for(con, path, "enacted")
         return {"id": f"{expr}{frag or ''}"}
+    m = re.search(r"(?:W\.?S\.?\s*)?\b(\d{1,2}(?:\.\d+)?)-(\d+(?:\.\d+)?-\d+)\b", c)
+    if m:
+        tnum = m.group(1).replace(".", "-")
+        row = con.execute("SELECT id FROM works WHERE jurisdiction = 'wy' AND"
+                          " number = ?", (tnum,)).fetchone()
+        if row:
+            expr = expression_for(con, row[0], "consolidated")
+            return {"id": _fragment_id(con, expr, f"{m.group(1)}-{m.group(2)}")}
+    m = re.search(r"(?:(\d+)\s*U\.?S\.?C\.?|\bIRC\b)\s*§?\s*"
+                  r"(\d+[A-Za-z]*)", c)
+    if m:
+        title = m.group(1) or "26"
+        row = con.execute("SELECT id FROM works WHERE type = 'usc' AND"
+                          " number = ?", (title,)).fetchone()
+        if row:
+            expr = expression_for(con, row[0], "consolidated")
+            return {"id": _fragment_id(con, expr, m.group(2))}
     m = re.search(r"(?:^|\b)(?:s\.?|section|art\.?|artigo)\s*"
                   r"(\d+)(?:\.?º)?(?:\s*-\s*([A-Za-z]))?"
                   r"\s+(?:of\s+(?:the\s+)?|d[oa]\s+)?(.+)", c, re.IGNORECASE)
@@ -523,7 +876,7 @@ def q_resolve(con, citation):
         sec, name = None, c
     ym = re.search(r"(\d{4})\s*$", name)
     year = int(ym.group(1)) if ym else None
-    name_key = re.sub(r"\d{4}\s*$", "", name).strip().upper()
+    name_key = re.sub(r"[/,]?\s*\d{4}\s*$", "", name).strip().upper()
     for work_id, title, wyear, aliases in con.execute(
             "SELECT id, title, year, aliases FROM works"):
         if year and wyear != year:

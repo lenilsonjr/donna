@@ -156,6 +156,33 @@ stays.
 - **AC23** The CLI form MUST honor `--json` and the MCP server MUST expose
   donna_check. Verification: parsed JSON output and a scripted MCP call.
 
+## M8 acceptance criteria (corpus expansion: PT general law, BR, US)
+
+- **AC24** Work→source dispatch MUST move from jurisdiction-keyed adapters to
+  a per-Work registry, so one jurisdiction can have several source systems
+  (Portugal: Portal das Finanças for tax codes, PGDL for general laws).
+  Pattern adapters (Ireland: any act) remain. Verification: existing
+  Expressions re-ingest with unchanged hashes.
+- **AC25** A PGDL adapter (Tier B, pgdlisboa.pt, ISO-8859-1, paginated pages)
+  MUST ingest at least: Código da Estrada (DL 114/94), Regime Jurídico das
+  Armas e Munições (Lei 5/2006), Legislação de Combate à Droga (DL 15/93),
+  Consumo de Estupefacientes (Lei 30/2000), Lei de Segurança Interna
+  (Lei 53/2008), Código Penal (DL 400/82), Código de Processo Penal
+  (DL 78/87), Estado de Sítio e de Emergência (Lei 44/86). The page's own
+  article TOC MUST serve as the completeness check. Verification: ingest
+  checks; resolve "art. 27.º Código da Estrada"; quote a verbatim passage.
+- **AC26** A Planalto adapter (Tier B, planalto.gov.br, windows-1252) MUST
+  ingest Brazil's Código Eleitoral (Lei 4.737/1965, compilado), Lei das
+  Eleições (Lei 9.504/1997) and Lei dos Partidos Políticos (Lei 9.096/1995),
+  excluding struck-through (revoked) inline text from canonical content and
+  counting it. Verification: ingest checks; resolve "art. 23 Lei 9.504/1997"
+  (doações); quote verbatim + tampered.
+- **AC27** A US adapter MUST ingest the Internal Revenue Code (26 USC) from
+  the USLM XML release point at uscode.house.gov (Tier A). Wyoming statutes
+  (Title 17 ch. 29, LLCs) are in scope but blocked: wyoleg.gov is an SPA -
+  find its data API or record the blocker. Verification: resolve
+  "26 USC 951A"-style citations; quote verbatim from an ingested section.
+
 ## Open questions
 
 - **Q1** ANSWERED at M5 build start (2026-09-01): sshsig - `ssh-keygen -Y`
@@ -191,8 +218,10 @@ M5: attestation signing (Q1).
 M6: derived embedding index (Q2; blocked pending the Q2 answer). M7: change
 feed - `donna check` re-acquires an Expression's source without writing and
 reports source-level vs content-level change against the stored corpus; the
-seed of watch/subscriptions. M7 proceeds while M6 awaits Q2. Later
-milestones are shells on purpose; detail lands when a milestone unblocks.
+seed of watch/subscriptions. M7 proceeds while M6 awaits Q2. M8: corpus expansion - per-Work source
+registry, PGDL + Planalto + USLM adapters, the PT civil-liberties pack, the
+BR election pack, US tax; case law explicitly out of scope. Later milestones
+are shells on purpose; detail lands when a milestone unblocks.
 
 ## Suggested technical approach
 
