@@ -391,13 +391,18 @@ def pt_at_acquire(cfg, version):
 
 # ---------------------------------------------------------------- PGDL adapter
 
-PGDL_PARSER = "donna-pgdl/0.5.0"
+PGDL_PARSER = "donna-pgdl/0.7.0"
 PGDL_URL = ("https://www.pgdlisboa.pt/leis/lei_mostra_articulado.php"
             "?nid={nid}&tabela=leis&ficha=1&pagina={p}")
 PGDL_HEADER = re.compile(
     r'<td class=txt_base_b_l[^>]*>.{0,200}?'
     r'(?:Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
     r'|(TABELA\s+[IVX]+(?:-[A-Z])?|ANEXO(?:\s+[IVX]+)?))'
+    r'\s*(?:<br>\s*([^<]*))?</td>', re.S)
+PGDL_HEADER_POINTS = re.compile(  # portarias: bare numbered points + Mapa annex
+    r'<td class=txt_base_b_l[^>]*>.{0,200}?'
+    r'(?:(\d+)\.º(?:-([A-Z]+))?'
+    r'|(TABELA\s+[IVX]+(?:-[A-Z])?|ANEXO(?:\s+[IVX]+)?|MAPA|Mapa))'
     r'\s*(?:<br>\s*([^<]*))?</td>', re.S)
 
 def _pgdl_clean(chunk, counts):
@@ -433,15 +438,18 @@ def pgdl_acquire(cfg, version):
         raws.append(raw)
         pages.append(raw.decode("iso-8859-1", errors="replace"))
     expected = []
-    for m in re.finditer(r'<option value="%sA\d+">Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
-                         % cfg["nid"], pages[0]):
+    toc_re = (r'<option value="%sA\d+">(?:Artigo\s+)?(\d+)\.º(?:-([A-Z]+))?'
+              if cfg.get("points") else
+              r'<option value="%sA\d+">Artigo\s+(\d+)\.º(?:-([A-Z]+))?')
+    for m in re.finditer(toc_re % cfg["nid"], pages[0]):
         n = m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
         if n not in expected:
             expected.append(n)
     counts = {"struct": 0}
     fragments, seen = [], set()
     for page in pages:
-        heads = list(PGDL_HEADER.finditer(page))
+        header_re = PGDL_HEADER_POINTS if cfg.get("points") else PGDL_HEADER
+        heads = list(header_re.finditer(page))
         for i, m in enumerate(heads):
             if m.group(3):  # annex/table header
                 kind = "annex"
@@ -455,13 +463,25 @@ def pgdl_acquire(cfg, version):
                 continue
             seen.add(number)
             end = heads[i + 1].start() if i + 1 < len(heads) else len(page)
-            body = _pgdl_clean(page[m.end():end], counts)
+            chunk = page[m.end():end]
+            body = _pgdl_clean(chunk, counts)
             # PGDL appends an amendment-history footer to each article
             cut = re.search(r"Contém as alterações|Consultar versões anteriores"
                             r"|Consultar esta disposição", body)
             if cut:
                 body = canonical(body[:cut.start()])
                 counts["hist"] = counts.get("hist", 0) + 1
+            if not body and kind == "annex":
+                # scanned annexes are served as images; anchor their bytes
+                lines = []
+                for src_m in re.finditer(r"<img src='([^']+)'", chunk):
+                    href = src_m.group(1).replace("../", "")
+                    img = fetch("https://www.pgdlisboa.pt/" + href.replace(" ", "%20"))
+                    raws.append(img)
+                    name = href.rsplit("/", 1)[-1]
+                    lines.append(f"[imagem: {name} sha256:{sha256(img)}]")
+                    counts["img"] = counts.get("img", 0) + 1
+                body = canonical("\n".join(lines))
             fragments.append({"kind": kind, "number": number,
                               "heading": heading, "text": body})
     missing = [n for n in expected if n not in seen]
@@ -474,6 +494,7 @@ def pgdl_acquire(cfg, version):
               "numbering_gaps": numbering_gaps(seq),
               "empty_fragments": [f["number"] for f in fragments if not f["text"]],
               "structure_cells_stripped": counts["struct"],
+              "image_assets_anchored": counts.get("img", 0),
               "history_footers_stripped": counts.get("hist", 0)}
     return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
             "fragments": fragments, "label": "consolidated", "lang": "pt",
@@ -712,6 +733,12 @@ WORKS = {
         "title": "Wyoming Statutes Title 34.1 - Uniform Commercial Code",
         "aliases": "WYOMING UCC,UCC,WY TITLE 34.1",
     },
+    ("us", "1926", "usc", "15"): {
+        "source": govinfo_acquire, "package": "USCODE-2023-title15",
+        "title": "United States Code Title 15 - Commerce and Trade"
+                 " (2023 edition, GovInfo)",
+        "aliases": "15 USC,TITLE 15,COMMERCE AND TRADE",
+    },
     ("us", "1986", "usc", "26"): {
         "source": govinfo_acquire, "package": "USCODE-2023-title26",
         "title": "Internal Revenue Code - 26 U.S.C. (2023 edition, GovInfo)",
@@ -746,6 +773,13 @@ WORKS = {
         "title": "Utilização de Medicamentos e Substâncias à Base da Planta"
                  " de Canábis (DL n.º 8/2019)",
         "aliases": "DL 8/2019,REGULAMENTO DA CANABIS",
+    },
+    ("pt", "1996", "portaria", "94"): {
+        "source": pgdl_acquire, "nid": "192",
+        "points": True,
+        "title": "Diagnóstico e Exames Periciais - Limites Quantitativos"
+                 " Máximos (Portaria n.º 94/96)",
+        "aliases": "PORTARIA 94/96,LIMITES QUANTITATIVOS,MAPA DA PORTARIA",
     },
     ("pt", "1986", "lei", "44"): {
         "source": pgdl_acquire, "nid": "1712",

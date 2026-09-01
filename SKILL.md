@@ -51,7 +51,9 @@ Add `--json` before the verb for machine-readable output (same exit codes).
   `pt/1993/dec-lei/15` **including the substance schedules as annex
   fragments** (`#anexo-tabela-i-c` holds cannabis — the statutory spelling
   is "Canabis", unaccented); descriminalização Lei 30/2000
-  `pt/2000/lei/30`; medical cannabis Lei 33/2018 `pt/2018/lei/33` + DL
+  `pt/2000/lei/30`; Portaria 94/96 `pt/1996/portaria/94` (limites
+  quantitativos — its Mapa is a scanned image, anchored as
+  `#anexo-mapa` with the image's sha256, not yet transcribed); medical cannabis Lei 33/2018 `pt/2018/lei/33` + DL
   8/2019 `pt/2019/dec-lei/8`; Lei de Segurança Interna `pt/2008/lei/53`;
   Código Penal `pt/1982/dec-lei/400`; Código de Processo Penal
   `pt/1987/dec-lei/78`; Estado de Sítio/Emergência `pt/1986/lei/44`
@@ -59,9 +61,10 @@ Add `--json` before the verb for machine-readable output (same exit codes).
 - **Brazil (elections)**: Código Eleitoral `br/1965/lei/4737`; Lei das
   Eleições `br/1997/lei/9504` (doações: art. 23); Lei dos Partidos
   `br/1995/lei/9096` (all `@consolidated:pt-BR`, Planalto).
-- **US federal**: Internal Revenue Code `us/1986/usc/26` — 1,875 sections,
-  2023 edition via GovInfo (`@consolidated:en`); resolve accepts
-  "26 USC 951A" / "IRC § 7701".
+- **US federal**: Internal Revenue Code `us/1986/usc/26` (1,875 sections)
+  and Title 15 Commerce and Trade `us/1926/usc/15` (2,434 sections — Sherman
+  Act at `#sec-1`), 2023 editions via GovInfo (`@consolidated:en`); resolve
+  accepts "26 USC 951A" / "15 USC 1" / "IRC § 7701".
 - **Wyoming**: Title 17 (corporations; ch. 29 = LLC Act)
   `wy/1977/title/17`; Title 34.1 (UCC) `wy/1977/title/34-1`
   (`@consolidated:en`); resolve accepts "W.S. 17-29-201".
