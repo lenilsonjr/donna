@@ -404,6 +404,9 @@ def ingest(con, work_path):
 
 # ---------------------------------------------------------------- resolve
 
+class DonnaError(Exception):
+    """Verb-level failure surfaced as exit 1 on the CLI, isError over MCP."""
+
 def acronym(title):
     words = [w for w in re.split(r"\W+", title) if w and not w.isdigit()
              and w.upper() not in ("OF", "AND", "THE", "AN", "A", "ACT")]
@@ -420,30 +423,30 @@ def expression_for(con, work_id, version):
     if len(rows) == 1:  # Q6 interim rule: fall back to the only Expression
         return rows[0][0]
     if rows:
-        sys.exit(f"no {version} expression for {work_id!r}; have: "
-                 + ", ".join(r[0] for r in rows))
-    sys.exit(f"no expressions ingested for {work_id!r}")
+        raise DonnaError(f"no {version} expression for {work_id!r}; have: "
+                         + ", ".join(r[0] for r in rows))
+    raise DonnaError(f"no expressions ingested for {work_id!r}")
 
 def _fragment_id(con, expr, sec):
     for prefix in ("sec", "art"):
         fid = f"{expr}#{prefix}-{sec}"
         if con.execute("SELECT 1 FROM fragments WHERE id = ?", (fid,)).fetchone():
             return fid
-    sys.exit(f"no fragment numbered {sec!r} in {expr}")
+    raise DonnaError(f"no fragment numbered {sec!r} in {expr}")
 
-def resolve(con, citation):
+def q_resolve(con, citation):
     c = citation.strip()
     m = re.search(r"(?:irishstatutebook\.ie|revisedacts\.lawreform\.ie)"
                   r"/eli/(\d{4})/act/(\d+)(?:/section/(\d+\w*))?/(enacted|revised)", c)
     if m:
         year, num, sec, version = m.groups()
         expr = expression_for(con, f"ie/{year}/act/{num}", version)
-        return _fragment_id(con, expr, sec) if sec else expr
+        return {"id": _fragment_id(con, expr, sec) if sec else expr}
     m = re.fullmatch(r"([\w-]+/\d{4}/[\w-]+/[\w-]+)(@[\w:.-]+)?(#[\w.-]+)?", c)
     if m:
         path, version, frag = m.groups()
         expr = f"{path}{version}" if version else expression_for(con, path, "enacted")
-        return f"{expr}{frag or ''}"
+        return {"id": f"{expr}{frag or ''}"}
     m = re.search(r"(?:^|\b)(?:s\.?|section|art\.?|artigo)\s*"
                   r"(\d+)(?:\.?º)?(?:\s*-\s*([A-Za-z]))?"
                   r"\s+(?:of\s+(?:the\s+)?|d[oa]\s+)?(.+)", c, re.IGNORECASE)
@@ -464,8 +467,8 @@ def resolve(con, citation):
                 and name_key != acronym(title) and name_key not in candidates:
             continue
         expr = expression_for(con, work_id, "enacted")
-        return _fragment_id(con, expr, sec) if sec else expr
-    sys.exit(f"cannot resolve {citation!r}")
+        return {"id": _fragment_id(con, expr, sec) if sec else expr}
+    raise DonnaError(f"cannot resolve {citation!r}")
 
 # ---------------------------------------------------------------- read verbs
 
@@ -473,66 +476,65 @@ def get_fragment(con, fid):
     row = con.execute("SELECT id, heading, text, content_hash, expression_id"
                       " FROM fragments WHERE id = ?", (fid,)).fetchone()
     if not row:
-        sys.exit(f"unknown fragment {fid!r} (is the Work ingested?)")
+        raise DonnaError(f"unknown fragment {fid!r} (is the Work ingested?)")
     return row
 
-def cmd_text(con, ident):
+def q_text(con, ident):
     if "#" in ident:
         _, heading, text, _, _ = get_fragment(con, ident)
-        print(heading + "\n" if heading else "", end="")
-        print(text)
-    else:
-        rows = con.execute("SELECT heading, text FROM fragments WHERE expression_id = ?"
-                           " ORDER BY ord", (ident,)).fetchall()
-        if not rows:
-            sys.exit(f"unknown expression {ident!r}")
-        for heading, text in rows:
-            print((heading + "\n" if heading else "") + text + "\n")
+        return {"id": ident, "heading": heading, "text": text}
+    rows = con.execute("SELECT id, heading, text FROM fragments WHERE"
+                       " expression_id = ? ORDER BY ord", (ident,)).fetchall()
+    if not rows:
+        raise DonnaError(f"unknown expression {ident!r}")
+    return {"id": ident, "fragments": [{"id": i, "heading": h, "text": t}
+                                       for i, h, t in rows]}
 
-def cmd_status(con, ident):
+def q_status(con, ident):
     expr_id = ident.split("#")[0]
     expr = con.execute("SELECT e.id, w.title, e.source_url, e.content_hash,"
                        " e.ingested_at FROM expressions e JOIN works w"
                        " ON w.id = e.work_id WHERE e.id = ?", (expr_id,)).fetchone()
     if not expr:
-        sys.exit(f"unknown expression {expr_id!r}")
-    print(f"expression: {expr[0]}\ntitle:      {expr[1]}\nsource:     {expr[2]}")
-    print(f"expr_hash:  {expr[3]}\ningested:   {expr[4]}")
+        raise DonnaError(f"unknown expression {expr_id!r}")
+    out = {"expression": {"id": expr[0], "title": expr[1], "source_url": expr[2],
+                          "content_hash": expr[3], "ingested_at": expr[4]}}
     if "#" in ident:
         frag = get_fragment(con, ident)
-        print(f"fragment:   {frag[0]}\nfrag_hash:  {frag[3]}")
+        out["fragment"] = {"id": frag[0], "content_hash": frag[3]}
     att = con.execute("SELECT fetched_at, raw_sha256, parser, checks_json FROM"
                       " attestations WHERE expression_id = ? ORDER BY id DESC",
                       (expr_id,)).fetchone()
     if att:
-        print(f"attested:   {att[0]}  parser {att[2]}\nraw_sha256: {att[1]}")
-        print(f"checks:     {att[3]}")
+        out["attestation"] = {"fetched_at": att[0], "raw_sha256": att[1],
+                              "parser": att[2], "checks": json.loads(att[3])}
+    return out
 
-def cmd_versions(con, work_path):
+def q_versions(con, work_path):
     rows = con.execute("SELECT id, content_hash, ingested_at, source_url FROM"
                        " expressions WHERE work_id = ? ORDER BY version",
                        (work_path,)).fetchall()
     if not rows:
-        sys.exit(f"no expressions ingested for {work_path!r}")
-    for eid, h, at, url in rows:
-        print(f"{eid}\n  hash {h[:16]}…  ingested {at}\n  {url}")
+        raise DonnaError(f"no expressions ingested for {work_path!r}")
+    return {"work": work_path,
+            "expressions": [{"id": i, "content_hash": h, "ingested_at": at,
+                             "source_url": u} for i, h, at, u in rows]}
 
-def cmd_quote(con, fid, text):
+def q_quote(con, fid, text):
     _, _, body, _, _ = get_fragment(con, fid)
     needle, hay = quote_normal(text), quote_normal(body)
     if needle in hay:
-        print(f"VERIFIED: quote appears verbatim in {fid}")
-        return 0
+        return {"verified": True, "fragment": fid}
     words = hay.split()
     n = max(len(needle.split()), 4)
     windows = [" ".join(words[i:i + n]) for i in range(0, max(len(words) - n + 1, 1))]
     best = difflib.get_close_matches(needle, windows, n=1, cutoff=0)
-    print(f"NOT VERIFIED: quote not found in {fid}", file=sys.stderr)
+    out = {"verified": False, "fragment": fid}
     if best:
-        print(f"nearest text: {best[0][:300]}", file=sys.stderr)
-    return 1
+        out["nearest"] = best[0][:300]
+    return out
 
-def cmd_search(con, query):
+def q_search(con, query):
     if HAS_FTS:
         rows = con.execute("SELECT id, heading, snippet(fragments_fts, 2, '[', ']',"
                            " '…', 12) FROM fragments_fts WHERE fragments_fts MATCH ?"
@@ -540,23 +542,142 @@ def cmd_search(con, query):
     else:
         rows = con.execute("SELECT id, heading, substr(text, 1, 80) FROM fragments"
                            " WHERE text LIKE ? LIMIT 10", (f"%{query}%",)).fetchall()
-    for fid, heading, snip in rows:
-        print(f"{fid}\n  {heading}\n  {snip}")
-    if not rows:
-        sys.exit("no matches")
+    return {"query": query,
+            "results": [{"id": i, "heading": h, "snippet": s} for i, h, s in rows]}
 
-def cmd_diff(con, a, b):
+def q_diff(con, a, b):
     fa, fb = get_fragment(con, a), get_fragment(con, b)
-    out = difflib.unified_diff(fa[2].splitlines(), fb[2].splitlines(),
-                               fromfile=a, tofile=b, lineterm="")
-    print("\n".join(out) or "identical")
+    out = list(difflib.unified_diff(fa[2].splitlines(), fb[2].splitlines(),
+                                    fromfile=a, tofile=b, lineterm=""))
+    return {"a": a, "b": b, "identical": not out, "diff": "\n".join(out)}
+
+# ---------------------------------------------------------------- mcp server
+
+MCP_VERSION = "donna/0.4.0"
+_S = lambda name, desc: {"type": "object", "required": [name],
+                         "properties": {name: {"type": "string", "description": desc}}}
+MCP_TOOLS = [
+    {"name": "donna_resolve",
+     "description": "Resolve a legal citation (human form like 's 42 DPA 2018' or"
+                    " 'art. 66.º CIRC', an ELI URL, or an id path) to a canonical"
+                    " fragment/expression id.",
+     "inputSchema": _S("citation", "the citation to resolve")},
+    {"name": "donna_text",
+     "description": "Canonical text of a fragment id (or all fragments of an"
+                    " expression id).",
+     "inputSchema": _S("id", "fragment or expression id")},
+    {"name": "donna_status",
+     "description": "Provenance for an id: source URL, content hashes, ingestion"
+                    " attestation and structure-check results.",
+     "inputSchema": _S("id", "fragment or expression id")},
+    {"name": "donna_versions",
+     "description": "List every ingested Expression (version) of a Work.",
+     "inputSchema": _S("work", "work path, e.g. ie/2018/act/7")},
+    {"name": "donna_quote",
+     "description": "Verify that a quote appears verbatim (typographic tolerance"
+                    " only) in a fragment. Returns verified true/false and, when"
+                    " false, the nearest actual text. THE claim-verification"
+                    " primitive: run it on every legal quotation before relying"
+                    " on it.",
+     "inputSchema": {"type": "object", "required": ["id", "text"],
+                     "properties": {"id": {"type": "string",
+                                           "description": "fragment id"},
+                                    "text": {"type": "string",
+                                             "description": "the quoted text"}}}},
+    {"name": "donna_search",
+     "description": "Lexical full-text search over ingested fragments.",
+     "inputSchema": _S("query", "search terms")},
+    {"name": "donna_diff",
+     "description": "Unified diff of two fragments' canonical text (e.g. the same"
+                    " section across enacted and revised Expressions).",
+     "inputSchema": {"type": "object", "required": ["a", "b"],
+                     "properties": {"a": {"type": "string"},
+                                    "b": {"type": "string"}}}},
+]
+
+def _mcp_dispatch(con, name, args):
+    if name == "donna_resolve":
+        return q_resolve(con, args["citation"])
+    if name == "donna_text":
+        return q_text(con, args["id"])
+    if name == "donna_status":
+        return q_status(con, args["id"])
+    if name == "donna_versions":
+        return q_versions(con, args["work"])
+    if name == "donna_quote":
+        return q_quote(con, args["id"], args["text"])
+    if name == "donna_search":
+        return q_search(con, args["query"])
+    if name == "donna_diff":
+        return q_diff(con, args["a"], args["b"])
+    raise DonnaError(f"unknown tool {name!r}")
+
+def cmd_mcp(con):
+    def send(payload):
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        mid, method = msg.get("id"), msg.get("method")
+        params = msg.get("params") or {}
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "donna", "version": MCP_VERSION}}})
+        elif method == "tools/list":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": MCP_TOOLS}})
+        elif method == "tools/call":
+            try:
+                data = _mcp_dispatch(con, params.get("name", ""),
+                                     params.get("arguments") or {})
+                result = {"content": [{"type": "text",
+                                       "text": json.dumps(data, ensure_ascii=False)}],
+                          "isError": False}
+            except (DonnaError, KeyError) as e:
+                result = {"content": [{"type": "text", "text": str(e)}],
+                          "isError": True}
+            send({"jsonrpc": "2.0", "id": mid, "result": result})
+        elif method == "ping":
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif mid is not None:
+            send({"jsonrpc": "2.0", "id": mid,
+                  "error": {"code": -32601, "message": f"method not found: {method}"}})
 
 # ---------------------------------------------------------------- cli
+
+def _print_status(out):
+    e = out["expression"]
+    print(f"expression: {e['id']}\ntitle:      {e['title']}\nsource:     {e['source_url']}")
+    print(f"expr_hash:  {e['content_hash']}\ningested:   {e['ingested_at']}")
+    if "fragment" in out:
+        print(f"fragment:   {out['fragment']['id']}\nfrag_hash:  {out['fragment']['content_hash']}")
+    if "attestation" in out:
+        a = out["attestation"]
+        print(f"attested:   {a['fetched_at']}  parser {a['parser']}\nraw_sha256: {a['raw_sha256']}")
+        print(f"checks:     {json.dumps(a['checks'], ensure_ascii=False)}")
+
+def _print_text(out):
+    frags = out.get("fragments") or [out]
+    for f in frags:
+        if f.get("heading"):
+            print(f["heading"])
+        print(f["text"])
+        if len(frags) > 1:
+            print()
 
 def main():
     ap = argparse.ArgumentParser(prog="donna", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default="donna.db")
+    ap.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON on stdout")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ingest").add_argument("work")
     sub.add_parser("resolve").add_argument("citation")
@@ -566,24 +687,69 @@ def main():
     q = sub.add_parser("quote"); q.add_argument("id"); q.add_argument("text")
     sub.add_parser("search").add_argument("query")
     d = sub.add_parser("diff"); d.add_argument("a"); d.add_argument("b")
+    sub.add_parser("mcp")
     args = ap.parse_args()
     con = db_open(args.db)
     if args.cmd == "ingest":
         ingest(con, args.work)
-    elif args.cmd == "resolve":
-        print(resolve(con, args.citation))
+        return
+    if args.cmd == "mcp":
+        cmd_mcp(con)
+        return
+    try:
+        if args.cmd == "resolve":
+            out = q_resolve(con, args.citation)
+        elif args.cmd == "versions":
+            out = q_versions(con, args.work)
+        elif args.cmd == "text":
+            out = q_text(con, args.id)
+        elif args.cmd == "status":
+            out = q_status(con, args.id)
+        elif args.cmd == "quote":
+            out = q_quote(con, args.id, args.text)
+        elif args.cmd == "search":
+            out = q_search(con, args.query)
+        elif args.cmd == "diff":
+            out = q_diff(con, args.a, args.b)
+    except DonnaError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        else:
+            print(e, file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+        if args.cmd == "quote" and not out["verified"]:
+            sys.exit(1)
+        if args.cmd == "search" and not out["results"]:
+            sys.exit(1)
+        return
+    if args.cmd == "resolve":
+        print(out["id"])
     elif args.cmd == "versions":
-        cmd_versions(con, args.work)
+        for e in out["expressions"]:
+            print(f"{e['id']}\n  hash {e['content_hash'][:16]}…  ingested"
+                  f" {e['ingested_at']}\n  {e['source_url']}")
     elif args.cmd == "text":
-        cmd_text(con, args.id)
+        _print_text(out)
     elif args.cmd == "status":
-        cmd_status(con, args.id)
+        _print_status(out)
     elif args.cmd == "quote":
-        sys.exit(cmd_quote(con, args.id, args.text))
+        if out["verified"]:
+            print(f"VERIFIED: quote appears verbatim in {out['fragment']}")
+        else:
+            print(f"NOT VERIFIED: quote not found in {out['fragment']}",
+                  file=sys.stderr)
+            if out.get("nearest"):
+                print(f"nearest text: {out['nearest']}", file=sys.stderr)
+            sys.exit(1)
     elif args.cmd == "search":
-        cmd_search(con, args.query)
+        for r in out["results"]:
+            print(f"{r['id']}\n  {r['heading']}\n  {r['snippet']}")
+        if not out["results"]:
+            sys.exit("no matches")
     elif args.cmd == "diff":
-        cmd_diff(con, args.a, args.b)
+        print(out["diff"] or "identical")
 
 if __name__ == "__main__":
     main()

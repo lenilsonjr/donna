@@ -21,10 +21,14 @@ wrong. That primitive — cheap, mechanical, source-anchored — is the point.
 
 Python stdlib only. Corpus lives in SQLite next to the CLI. See `SPEC.md` for
 the model (FRBR Works/Expressions/Fragments, ELI-aligned ids, adapter tiers,
-trust chain) and the roadmap (Revised Acts diffing, Portugal DRE adapter, MCP
-server, attestation signing).
+trust chain) and the roadmap.
 
-Status: M3 - two jurisdictions, three Expressions. Ireland: DPA 2018 enacted
+Three surfaces, one set of verbs: the CLI is canonical (agents with a shell
+drive it directly; `SKILL.md` teaches them how), `--json` makes every read
+verb machine-readable, and `donna mcp` serves the read verbs as MCP tools
+over stdio for hosts without a shell. `ingest` stays CLI-only by design.
+
+Status: M4 - two jurisdictions, three Expressions, three agent surfaces. Ireland: DPA 2018 enacted
 (eISB) and revised (Law Reform Commission), both Tier-A XML; `donna diff`
 shows real amendment history and the same quote verifies against revised
 while failing against enacted. Portugal: the CIRC (Código do IRC) from Portal

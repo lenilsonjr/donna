@@ -108,6 +108,22 @@ redaction attributions (`em` elements, "Redação da Lei n.º …") are editoria
 and are stripped and counted; statutory status text such as "(Revogado.)"
 stays.
 
+## M4 acceptance criteria (agent surfaces)
+
+- **AC16** Every read verb (resolve, versions, text, status, quote, search,
+  diff) MUST accept `--json` and emit machine-readable JSON; `quote` MUST
+  keep its exit-code contract in both modes. Verification: each verb run with
+  `--json` and parsed.
+- **AC17** `donna mcp` MUST serve the read verbs as MCP tools over stdio
+  (newline-delimited JSON-RPC 2.0: initialize, tools/list, tools/call),
+  stdlib only and read-only - `ingest` stays CLI-only by design.
+  Verification: scripted JSON-RPC session exercising initialize, tools/list,
+  and donna_quote for a verified quote, a tampered quote, and an unknown
+  fragment (isError).
+- **AC18** The repo MUST carry a SKILL.md that teaches a shell-capable
+  harness to drive the CLI: corpus contents, verb contract, ingest etiquette.
+  Verification: inspection; a symlink into `~/.claude/skills` makes it live.
+
 ## Open questions
 
 - **Q1** Which signing scheme anchors Attestations? Branch A: none, hashes only
@@ -130,8 +146,11 @@ stays.
 
 Build order, each blocking the next. M1: v0 tracer bullet (this page). M2:
 second Expression per Work (Law Reform Commission Revised Acts) plus `diff`
-and `status` across versions. M3: Portugal adapter (DRE ELI, consolidated
-regimes). M4: MCP server exposing the verbs. M5: attestation signing (Q1).
+and `status` across versions. M3: Portugal adapter (DRE ELI target; v0 ships Portal das Finanças). M4:
+agent surfaces - `--json` on read verbs, a stdio MCP shim over the same
+functions (read-only), and a SKILL.md for shell-capable harnesses; the CLI
+stays canonical and MCP is a distribution format, not the architecture.
+M5: attestation signing (Q1).
 M6: derived embedding index (Q2). Later milestones are shells on purpose;
 detail lands when a milestone unblocks.
 
