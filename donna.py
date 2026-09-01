@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS fragments(
   id TEXT PRIMARY KEY, expression_id TEXT REFERENCES expressions(id),
   kind TEXT, number TEXT, heading TEXT, text TEXT, ord INTEGER,
   content_hash TEXT);
+CREATE TABLE IF NOT EXISTS derived(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, fragment_id TEXT, kind TEXT,
+  producer TEXT, source_sha256 TEXT, content TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS attestations(
   id INTEGER PRIMARY KEY AUTOINCREMENT, expression_id TEXT, source_url TEXT,
   fetched_at TEXT, raw_sha256 TEXT, parser TEXT, checks_json TEXT);
@@ -1122,6 +1125,26 @@ def q_refs(con, scope=None):
                          "sample_source": v["sample"]}
                         for k, v in ranked[:25]]}
 
+def q_derive(con, fid, kind, producer, source_sha, content):
+    get_fragment(con, fid)  # must exist
+    with con:
+        con.execute("INSERT INTO derived(fragment_id, kind, producer,"
+                    " source_sha256, content, created_at) VALUES (?,?,?,?,?,?)",
+                    (fid, kind, producer, source_sha, content,
+                     datetime.now(timezone.utc).isoformat(timespec="seconds")))
+    return {"fragment": fid, "kind": kind, "stored": len(content)}
+
+def q_derived(con, fid):
+    rows = con.execute("SELECT kind, producer, source_sha256, content,"
+                       " created_at FROM derived WHERE fragment_id = ?"
+                       " ORDER BY id DESC", (fid,)).fetchall()
+    if not rows:
+        raise DonnaError(f"no derived artifacts for {fid!r}")
+    return {"fragment": fid,
+            "artifacts": [{"kind": k, "producer": p, "source_sha256": s,
+                           "content": c, "created_at": at}
+                          for k, p, s, c, at in rows]}
+
 # ---------------------------------------------------------------- mcp server
 
 MCP_VERSION = "donna/0.4.0"
@@ -1163,6 +1186,12 @@ MCP_TOOLS = [
                     " an Expression, compare against the stored corpus, and"
                     " check the ingestion attestation's sshsig signature.",
      "inputSchema": _S("expression", "expression id to verify")},
+    {"name": "donna_derived",
+     "description": "NON-CANONICAL: derived artifacts (e.g. LLM transcriptions"
+                    " of scanned annexes) attached to a fragment, with producer"
+                    " and source-image hash. Never quotable law - verify"
+                    " against the anchored image.",
+     "inputSchema": _S("id", "fragment id")},
     {"name": "donna_refs",
      "description": "Discovery: acts cited by the ingested corpus that are not"
                     " themselves ingested, ranked by citation count. Optional"
@@ -1204,6 +1233,8 @@ def _mcp_dispatch(con, name, args):
         return q_check(con, args["work"])
     if name == "donna_refs":
         return q_refs(con, args.get("scope"))
+    if name == "donna_derived":
+        return q_derived(con, args["id"])
     raise DonnaError(f"unknown tool {name!r}")
 
 def cmd_mcp(con):
@@ -1286,6 +1317,11 @@ def main():
     sub.add_parser("verify").add_argument("expression")
     sub.add_parser("check").add_argument("work")
     sub.add_parser("refs").add_argument("scope", nargs="?")
+    dv = sub.add_parser("derive")
+    dv.add_argument("id"); dv.add_argument("--kind", default="ocr-md")
+    dv.add_argument("--producer", required=True)
+    dv.add_argument("--source-sha256", required=True)
+    sub.add_parser("derived").add_argument("id")
     args = ap.parse_args()
     global KEY_DIR
     KEY_DIR = os.path.join(os.path.dirname(os.path.abspath(args.db)), ".donna")
@@ -1327,6 +1363,11 @@ def main():
             out = q_check(con, args.work)
         elif args.cmd == "refs":
             out = q_refs(con, args.scope)
+        elif args.cmd == "derive":
+            out = q_derive(con, args.id, args.kind, args.producer,
+                           args.source_sha256, sys.stdin.read())
+        elif args.cmd == "derived":
+            out = q_derived(con, args.id)
     except DonnaError as e:
         if args.json:
             print(json.dumps({"error": str(e)}, ensure_ascii=False))
@@ -1383,6 +1424,14 @@ def main():
             print("  mismatched: " + ", ".join(out["fragment_mismatches"]))
         if not out["ok"]:
             sys.exit(1)
+    elif args.cmd == "derive":
+        print(f"stored {out['kind']} for {out['fragment']} ({out['stored']} chars)")
+    elif args.cmd == "derived":
+        for a in out["artifacts"]:
+            print(f"NON-CANONICAL DERIVED ARTIFACT - {a['kind']} by {a['producer']}")
+            print(f"derived from image sha256:{a['source_sha256']} at {a['created_at']}")
+            print("verify against the anchored image before relying on values\n")
+            print(a["content"])
     elif args.cmd == "refs":
         for r in out["missing"]:
             print(f"{r['citations']:4}x  {r['work']}\n       e.g. cited in {r['sample_source']}")

@@ -200,6 +200,18 @@ stays.
   matter layer (mike), not donna. Verification: run over the corpus; output
   lists real uningested diplomas with counts; `--json` parses.
 
+## Derived artifacts (AC31)
+
+- **AC31** LLM-produced transcriptions of anchored image assets MUST live in
+  a `derived` table, never in `fragments`: keyed to the fragment, carrying
+  the producer id and the source image sha256 they were derived from.
+  `donna derive <fragment-id>` stores one from stdin; `donna derived
+  <fragment-id>` prints it behind an explicit non-canonical banner; the MCP
+  server exposes read-only donna_derived with the same marking. Canonical
+  text and quote verification never touch derived content. Verification:
+  the Portaria 94/96 Mapa transcription, cross-checked against the DL 15/93
+  schedules the corpus already holds.
+
 ## Open questions
 
 - **Q1** ANSWERED at M5 build start (2026-09-01): sshsig - `ssh-keygen -Y`
