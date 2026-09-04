@@ -266,8 +266,11 @@ corpus must be able to ground every governing-law clause they invoke.
   model, and the build machine has no local runtime (no ollama) - so the
   choice is donna's first dependency (local model) or an API key and per-call
   cost (hosted embeddings). Owner decision.
-- **Q3** How is the corpus distributed - git-tracked data files, GitHub
-  release artifacts, or a fetchable API only?
+- **Q3** ANSWERED (2026-09-04): GitHub release artifacts. A snapshot is a
+  VACUUMed copy of the db, gzipped, published with sha256 checksums after a
+  full verify sweep (every Expression's hashes and attestation signatures).
+  First release: corpus-2026-09-04. A fetchable API remains the hosted-donna
+  upgrade path.
 - **Q4** What license does the project ship under?
 - **Q5** Which organization/namespace publishes the repos?
 - **Q6** Which Expression does a human citation resolve to when a Work has

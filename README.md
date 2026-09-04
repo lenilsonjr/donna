@@ -100,10 +100,12 @@ Expressions and about 11,000 fragments: data protection, tax (CIRC, CIRS,
 the IRC), elections, drugs, arms, traffic, criminal law and procedure,
 arbitration, copyright, trade secrets, the GDPR and the Wyoming LLC Act.
 
-The SQLite corpus itself is not in the repo. Run `donna keygen` once, then
-`ingest` what you need; every Work above is one command. Corpus
-distribution as a downloadable, verifiable artifact is an open question in
-`SPEC.md`, along with embeddings (search is FTS for now) and the license.
+The SQLite corpus is not tracked in git; verified snapshots are published
+under [Releases](../../releases) with sha256 checksums, gzipped, after a
+full hash-and-signature sweep. Download one and place it next to `donna.py`
+as `donna.db`, or run `donna keygen` and `ingest` your own; every Work
+above is one command. Embeddings (search is FTS for now) and the license
+are open questions in `SPEC.md`.
 
 ## Not legal advice
 
