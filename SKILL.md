@@ -44,8 +44,9 @@ Add `--json` before the verb for machine-readable output (same exit codes).
 
 - **Ireland**: `ie/2018/act/7` Data Protection Act 2018 (`@enacted:en` and
   `@revised-2026-07-16:en`).
-- **Portugal (tax)**: `pt/1988/dec-lei/442-b` Código do IRC / CIRC
-  (`@consolidated:pt`) — includes art. 66.º (CFC).
+- **Portugal (tax, corporate)**: `pt/1988/dec-lei/442-b` Código do IRC /
+  CIRC (`@consolidated:pt`) — art. 2.º (residência: sede ou direcção
+  efectiva), art. 5.º (estabelecimento estável), art. 66.º (CFC).
 - **Portugal (general)**: Código da Estrada `pt/1994/dec-lei/114`; Lei das
   Armas `pt/2006/lei/5` (+ weapons annex); droga DL 15/93
   `pt/1993/dec-lei/15` **including the substance schedules as annex
@@ -68,6 +69,39 @@ Add `--json` before the verb for machine-readable output (same exit codes).
 - **Wyoming**: Title 17 (corporations; ch. 29 = LLC Act)
   `wy/1977/title/17`; Title 34.1 (UCC) `wy/1977/title/34-1`
   (`@consolidated:en`); resolve accepts "W.S. 17-29-201".
+- **US federal (contract pack)**: Title 9 Arbitration / Federal Arbitration
+  Act `us/1947/usc/9` (ch. 2 = New York Convention, `#sec-201`…`#sec-208`);
+  Title 17 Copyrights `us/1976/usc/17` (`#sec-101` "work made for hire"
+  definition, `#sec-201`, `#sec-204`); Title 18 Crimes `us/1948/usc/18`
+  (ch. 90 trade secrets / DTSA: `#sec-1833` whistleblower immunity,
+  `#sec-1836`, `#sec-1839`). 2023 editions, GovInfo, `@consolidated:en`.
+  Hyphenated sections resolve too: "15 USC 78dd-2" (FCPA, domestic concerns).
+- **England & Wales / UK**: Arbitration Act 1996 `uk/1996/ukpga/23`
+  (seat ss 2-3, stay s 9, substantive law s 46, challenges ss 67-69,
+  enforcement s 66); Contracts (Rights of Third Parties) Act 1999
+  `uk/1999/ukpga/31`; Late Payment of Commercial Debts (Interest) Act 1998
+  `uk/1998/ukpga/20`; Unfair Contract Terms Act 1977 `uk/1977/ukpga/50`
+  (ss 26-27: international-supply and choice-of-law carve-outs); Limitation
+  Act 1980 `uk/1980/ukpga/58` (s 5: six years). All `@revised-<date>:en`
+  from legislation.gov.uk CLML XML (Tier A). Pattern adapter: any
+  `uk/<year>/ukpga/<n>[@revised|@enacted]` ingests. Resolve accepts
+  "s 9 Arbitration Act 1996", "s 5A …", "s 26 UCTA 1977", and
+  legislation.gov.uk section URLs. Repealed sections (e.g. UCTA s 30,
+  Limitation Act s 34) are legitimately empty fragments.
+- **EU**: GDPR `eu/2016/reg/679` (`@consolidated:en`, the 2016-05-04
+  consolidation with the 2018 corrigendum; EUR-Lex ELI HTML, Tier B).
+  Resolve accepts "art. 28 GDPR", "Article 82 of Regulation (EU) 2016/679",
+  EUR-Lex ELI URLs. EUR-Lex answers HTTP 202 with an empty body while it
+  renders a page - the adapter says so; wait and retry the ingest.
+- **Delaware**: Title 6 ch. 27 Contracts `de/1953/title/6` (`#sec-2708`
+  choice of law, the $100,000 floor) and Title 10 ch. 57 Uniform Arbitration
+  Act `de/1953/title/10` (`@consolidated:en`, delcode.delaware.gov, Tier B).
+  **Coverage is partial by design** - only the chapters listed in the
+  registry; `status` shows `"coverage": "partial"` and the chapter list.
+  Resolve accepts "6 Del. C. § 2708".
+- **Portugal (tax, personal)**: Código do IRS / CIRS `pt/1988/dec-lei/442-a`
+  (`@consolidated:pt`, Portal das Finanças) - the personal-income side of
+  the CIRC pair, incl. the individual CFC imputation rule.
 
 No case law anywhere, by explicit scope decision. `versions <work>` confirms
 what is present. If a Work is missing, say so rather than ingesting on your

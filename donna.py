@@ -572,7 +572,7 @@ def planalto_acquire(cfg, version):
 
 # ---------------------------------------------------------------- GovInfo adapter
 
-GI_PARSER = "donna-govinfo/0.2.0"
+GI_PARSER = "donna-govinfo/0.2.2"
 
 def govinfo_acquire(cfg, version):
     if version != "consolidated":
@@ -588,11 +588,12 @@ def govinfo_acquire(cfg, version):
     cut_re = re.compile(r'class="(?:source-credit|note-head|note-body)')
     fragments, seen, notes_cut = [], set(), 0
     for hdr, body in zip(parts[1::2], parts[2::2]):
-        hdr = hdr.replace("&sect;", "§").replace("&#167;", "§")
+        hdr = html.unescape(hdr)  # &#8211; and friends before the dash pass
+        hdr = re.sub(r"[\u2010-\u2015\u2212]", "-", hdr)  # §78dd–2 uses an en dash
         m = re.match(r"§+\s*([0-9A-Za-z]+(?:-[0-9A-Za-z]+)?)[.,\s]*(.*)", hdr)
         if not m:
             continue
-        number, heading = m.group(1), html.unescape(m.group(2)).strip().rstrip("]")
+        number, heading = m.group(1), m.group(2).strip().rstrip("]")
         if number in seen:
             continue
         seen.add(number)
@@ -600,6 +601,7 @@ def govinfo_acquire(cfg, version):
         if cut:
             notes_cut += 1
             body = body[:cut.start()]
+        body = re.sub(r"<[^>]*$", "", body)  # tag opened by the cut point
         body = re.sub(r"</p>|</h4>|</tr>", "\n", body, flags=re.I)
         body = re.sub(r"<[^>]+>", "", body)
         fragments.append({"kind": "section", "number": number, "heading": heading,
@@ -614,8 +616,32 @@ def govinfo_acquire(cfg, version):
 
 # ---------------------------------------------------------------- Wyoming adapter
 
-WY_PARSER = "donna-wy-pdf/0.2.0"
+WY_PARSER = "donna-wy-pdf/0.3.0"
 WY_BASE = "https://wyoleg.gov/statutes/compress/"
+
+def _monotone_chain(items, keyfn):
+    """Longest non-decreasing subsequence of items by keyfn (O(n log n),
+    deterministic). Wrapped cross-references ("...see W.S.\n17-29-702.")
+    start lines too and look like headers; a greedy monotone filter lets one
+    such outlier reject every real header that follows it, the LIS keeps
+    the long true run and drops the outlier."""
+    import bisect
+    keys = [keyfn(x) for x in items]
+    tails, tails_idx, prev = [], [], [-1] * len(items)
+    for i, k in enumerate(keys):
+        j = bisect.bisect_right(tails, k)
+        if j == len(tails):
+            tails.append(k)
+            tails_idx.append(i)
+        else:
+            tails[j] = k
+            tails_idx[j] = i
+        prev[i] = tails_idx[j - 1] if j else -1
+    out, i = [], tails_idx[-1] if tails_idx else -1
+    while i != -1:
+        out.append(items[i])
+        i = prev[i]
+    return out[::-1]
 
 def wy_pdf_acquire(cfg, version):
     if version != "consolidated":
@@ -639,12 +665,7 @@ def wy_pdf_acquire(cfg, version):
         parts = number.split("-")
         return tuple(float(x) if "." in x else int(x) for x in parts[1:])
     heads = list(head_re.finditer(text))
-    picked, last = [], None
-    for m in heads:  # monotonic filter: wrapped cross-references start lines too
-        k = key(m.group(1))
-        if last is None or k >= last:
-            picked.append(m)
-            last = k
+    picked = _monotone_chain(heads, lambda m: key(m.group(1)))
     fragments, seen = [], set()
     for i, m in enumerate(picked):
         number = m.group(1)
@@ -676,9 +697,228 @@ def wy_pdf_acquire(cfg, version):
             "source_url": WY_BASE + cfg["file"], "raw": raw,
             "checks": checks, "parser": WY_PARSER}
 
+# ---------------------------------------------------------------- UK adapter (CLML)
+
+UK_PARSER = "donna-uk-clml/0.1.0"
+UK_NS = "{http://www.legislation.gov.uk/namespaces/legislation}"
+UK_SKIP = {UK_NS + "Commentary", UK_NS + "CommentaryRef"}
+UK_BLOCK_END = {UK_NS + t for t in ("Text", "Para", "ListItem", "tr", "Title",
+                                    "BlockText", "AppendText")}
+
+def _uk_serialize(el, out, counts, own_number=False):
+    tag = el.tag
+    if tag in UK_SKIP:
+        counts["commentary" if tag.endswith("Commentary") else "refs"] += 1
+        if el.tail:
+            out.append(el.tail)
+        return
+    if tag == UK_NS + "Pnumber":
+        if not own_number:
+            out.append("(" + "".join(el.itertext()).strip() + ") ")
+        if el.tail:
+            out.append(el.tail)
+        return
+    if tag == UK_NS + "td":
+        out.append(" ")
+    if el.text:
+        out.append(el.text)
+    for c in el:
+        _uk_serialize(c, out, counts)
+    if tag in UK_BLOCK_END:
+        out.append("\n")
+    if el.tail:
+        out.append(el.tail)
+
+def _uk_text(el, counts, skip_own_number=False):
+    out = []
+    for c in el:
+        if skip_own_number and c.tag == UK_NS + "Pnumber":
+            continue
+        if c.tag == UK_NS + "Title":
+            continue
+        _uk_serialize(c, out, counts)
+    return canonical("".join(out))
+
+def uk_acquire(year, wtype, num, version):
+    """legislation.gov.uk CLML XML (Tier A). @revised = the current revised
+    text (label carries dct:valid); @enacted = as originally enacted."""
+    base = f"https://www.legislation.gov.uk/{wtype}/{year}/{num}"
+    url = base + ("/enacted/data.xml" if version == "enacted" else "/data.xml")
+    raw = fetch(url, ua=BROWSER_UA)
+    root = ET.fromstring(raw)
+    dc = "{http://purl.org/dc/elements/1.1/}"
+    dct = "{http://purl.org/dc/terms/}"
+    title = (root.findtext(f".//{dc}title") or "").strip()
+    parent = {c: p for p in root.iter() for c in p}
+    counts = {"commentary": 0, "refs": 0}
+    fragments = []
+    body = root.find(f".//{UK_NS}Body")
+    if body is None:
+        raise DonnaError("no <Body> element - CLML layout may have changed")
+    for p1 in body.iter(UK_NS + "P1"):
+        pid = p1.get("id") or ""
+        if not pid.startswith("section-"):
+            continue
+        number = pid[len("section-"):]
+        heading = ""
+        grp = parent.get(p1)
+        if grp is not None and grp.tag == UK_NS + "P1group":
+            t = grp.find(UK_NS + "Title")
+            if t is not None:
+                heading = canonical("".join(t.itertext()))
+        text = _uk_text(p1, counts, skip_own_number=True)
+        fragments.append({"kind": "section", "number": number,
+                          "heading": heading, "text": text})
+    for sched in root.iter(UK_NS + "Schedule"):
+        sid = sched.get("id") or ""
+        if not sid.startswith("schedule-") or "-" in sid[len("schedule-"):]:
+            continue
+        number = sid[len("schedule-"):]
+        t = sched.find(f"{UK_NS}TitleBlock/{UK_NS}Title")
+        heading = canonical("".join(t.itertext())) if t is not None else ""
+        sb = sched.find(UK_NS + "ScheduleBody")
+        text = _uk_text(sb, counts) if sb is not None else ""
+        fragments.append({"kind": "schedule", "number": number,
+                          "heading": heading, "text": text})
+    if version == "enacted":
+        label = "enacted"
+    else:
+        valid = (root.findtext(f".//{dct}valid") or
+                 root.get("RestrictStartDate") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", valid):
+            raise DonnaError("revised source did not declare a valid-from date")
+        label = f"revised-{valid}"
+    seq = sorted({int(re.match(r"\d+", f["number"]).group(0))
+                  for f in fragments if f["kind"] == "section"
+                  and re.match(r"\d+", f["number"])})
+    ukm = "{http://www.legislation.gov.uk/namespaces/metadata}"
+    declared = root.find(f".//{ukm}BodyParagraphs")
+    checks = {"tier": "A",
+              "sections": sum(1 for f in fragments if f["kind"] == "section"),
+              "schedules": sum(1 for f in fragments if f["kind"] == "schedule"),
+              "declared_body_paragraphs": int(declared.get("Value"))
+              if declared is not None else None,
+              "numbering_gaps": numbering_gaps(seq),
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]],
+              "commentaries_stripped": counts["commentary"],
+              "commentary_refs_stripped": counts["refs"]}
+    return {"work_meta": {"title": title, "aliases": ""},
+            "fragments": fragments, "label": label, "lang": "en",
+            "source_url": url, "raw": raw, "checks": checks, "parser": UK_PARSER}
+
+# ---------------------------------------------------------------- EUR-Lex adapter (ELI)
+
+EU_PARSER = "donna-eurlex-eli/0.1.0"
+EU_BASE = "https://eur-lex.europa.eu/eli/"
+
+def _eu_strip(fragment_html):
+    t = re.sub(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", "", fragment_html,
+               flags=re.S)
+    t = re.sub(r"</(?:p|div|td|tr|li|table)>", "\n", t, flags=re.I)
+    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)
+    return canonical(html.unescape(t))
+
+def eurlex_acquire(cfg, version):
+    """EUR-Lex ELI HTML (Tier B). @consolidated = the consolidated text at
+    cfg['consolidated'] (YYYY-MM-DD); @enacted = the Official Journal text."""
+    if version == "enacted":
+        url = f"{EU_BASE}{cfg['eli']}/oj/eng"
+        label = "enacted"
+    else:
+        url = f"{EU_BASE}{cfg['eli']}/{cfg['consolidated']}/eng"
+        label = "consolidated"
+    raw = fetch(url, ua=BROWSER_UA)
+    page = raw.decode("utf-8", errors="replace")
+    heads = list(re.finditer(
+        r'<div class="eli-subdivision" id="art_(\d+[a-z]*)">', page))
+    if not heads:
+        raise DonnaError("no eli-subdivision article anchors - page layout may"
+                         " have changed (EUR-Lex answers 202 while rendering;"
+                         " retry)")
+    end_re = re.compile(r'<div class="eli-subdivision" id="(?!art_)|class="oj-final"'
+                        r'|class="final"|id="fin_|class="oj-signatory"'
+                        r'|<div class="eli-subdivision" id="art_')
+    fragments, seen = [], set()
+    for i, m in enumerate(heads):
+        number = m.group(1)
+        if number in seen:
+            continue
+        seen.add(number)
+        e = end_re.search(page, m.end())
+        chunk = page[m.end():e.start() if e else len(page)]
+        hm = re.search(r'class="(?:oj-sti-art|stitle-article-norm)"[^>]*>(.*?)</p>',
+                       chunk, re.S)
+        heading = _eu_strip(hm.group(1)) if hm else ""
+        chunk = re.sub(r'<p[^>]*class="(?:oj-ti-art|title-article-norm)"[^>]*>.*?</p>',
+                       "", chunk, count=1, flags=re.S)
+        if hm:
+            chunk = chunk.replace(hm.group(0), "", 1)
+        fragments.append({"kind": "article", "number": number, "heading": heading,
+                          "text": _eu_strip(chunk)})
+    seq = sorted({int(re.match(r"\d+", f["number"]).group(0)) for f in fragments})
+    checks = {"tier": "B", "articles": len(fragments),
+              "numbering_gaps": numbering_gaps(seq),
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]]}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": label, "lang": "en",
+            "source_url": url, "raw": raw, "checks": checks, "parser": EU_PARSER}
+
+# ---------------------------------------------------------------- Delaware adapter
+
+DE_PARSER = "donna-delcode/0.1.0"
+DE_BASE = "https://delcode.delaware.gov/"
+
+def delcode_acquire(cfg, version):
+    """delcode.delaware.gov chapter pages (Tier B). Coverage is the chapters
+    listed in cfg['chapters'] - declared partial in checks and title."""
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    sec_re = re.compile(r'<div class="SectionHead" id="([\w.-]+)">(.*?)</div>(.*?)'
+                        r'(?=<div class="SectionHead"|<div class="footer"|'
+                        r'<footer|</main>|$)', re.S)
+    fragments, seen, pages, raw_all = [], set(), [], []
+    toc_declared = toc_parsed = 0
+    for ch in cfg["chapters"]:
+        idx_url = f"{DE_BASE}title{cfg['title_no']}/{ch}/index.html"
+        idx = fetch(idx_url, ua=BROWSER_UA)
+        raw_all.append(idx)
+        idx_page = idx.decode("utf-8", errors="replace")
+        subs = sorted(set(re.findall(r'href="[^"]*/(sc\d+)/index\.html"', idx_page)))
+        urls = [f"{DE_BASE}title{cfg['title_no']}/{ch}/{s}/index.html" for s in subs] \
+            or [idx_url]
+        for u in urls:
+            page = idx_page if u == idx_url else None
+            if page is None:
+                r = fetch(u, ua=BROWSER_UA)
+                raw_all.append(r)
+                page = r.decode("utf-8", errors="replace")
+            pages.append(u)
+            toc_declared += len(re.findall(r'<a href="#[\w.-]+">\s*§', page))
+            for m in sec_re.finditer(page):
+                number = m.group(1)
+                if number in seen:
+                    continue
+                seen.add(number)
+                toc_parsed += 1
+                head = _eu_strip(m.group(2))
+                head = re.sub(r"^§\s*[\w.-]+\.\s*", "", head)
+                paras = re.findall(r"<p[^>]*>(.*?)</p>", m.group(3), re.S)
+                text = canonical("\n".join(_eu_strip(p) for p in paras))
+                fragments.append({"kind": "section", "number": number,
+                                  "heading": head.rstrip("."), "text": text})
+    checks = {"tier": "B", "coverage": "partial", "chapters": cfg["chapters"],
+              "pages_fetched": len(pages), "sections": len(fragments),
+              "toc_declared": toc_declared, "toc_parsed": toc_parsed,
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]]}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "en",
+            "source_url": f"{DE_BASE}title{cfg['title_no']}/", "raw": b"".join(raw_all),
+            "checks": checks, "parser": DE_PARSER}
+
 # ---------------------------------------------------------------- work registry
 
-ADAPTERS = {"ie": ie_acquire}  # pattern adapters: any Work in the jurisdiction
+ADAPTERS = {"ie": ie_acquire, "uk": uk_acquire}  # pattern adapters: any Work in the jurisdiction
 
 WORKS = {
     ("pt", "1988", "dec-lei", "442-b"): {
@@ -689,6 +929,15 @@ WORKS = {
         "index": PT_BASE + "/pt/informacao_fiscal/codigos_tributarios/CIRC_2R"
                  "/Pages/circ-codigo-do-irc-indice.aspx",
         "slug": "irc",
+    },
+    ("pt", "1988", "dec-lei", "442-a"): {
+        "source": pt_at_acquire,
+        "title": "Código do Imposto sobre o Rendimento das Pessoas Singulares"
+                 " (Código do IRS)",
+        "aliases": "CIRS,CODIGO DO IRS,CÓDIGO DO IRS",
+        "index": PT_BASE + "/pt/informacao_fiscal/codigos_tributarios/cirs_rep"
+                 "/Pages/codigo-do-irs-indice.aspx",
+        "slug": "irs",
     },
     ("pt", "1994", "dec-lei", "114"): {
         "source": pgdl_acquire, "nid": "349",
@@ -789,6 +1038,46 @@ WORKS = {
         "title": "Regime do Estado de Sítio e do Estado de Emergência"
                  " (Lei n.º 44/86)",
         "aliases": "ESTADO DE EMERGENCIA,ESTADO DE EMERGÊNCIA,ESTADO DE SITIO",
+    },
+    ("us", "1947", "usc", "9"): {
+        "source": govinfo_acquire, "package": "USCODE-2023-title9",
+        "title": "United States Code Title 9 - Arbitration (Federal Arbitration"
+                 " Act; 2023 edition, GovInfo)",
+        "aliases": "9 USC,TITLE 9,FAA,FEDERAL ARBITRATION ACT",
+    },
+    ("us", "1976", "usc", "17"): {
+        "source": govinfo_acquire, "package": "USCODE-2023-title17",
+        "title": "United States Code Title 17 - Copyrights (2023 edition,"
+                 " GovInfo)",
+        "aliases": "17 USC,TITLE 17,COPYRIGHT ACT,COPYRIGHTS",
+    },
+    ("us", "1948", "usc", "18"): {
+        "source": govinfo_acquire, "package": "USCODE-2023-title18",
+        "title": "United States Code Title 18 - Crimes and Criminal Procedure"
+                 " (incl. ch. 90 Protection of Trade Secrets / DTSA; 2023"
+                 " edition, GovInfo)",
+        "aliases": "18 USC,TITLE 18,DTSA,DEFEND TRADE SECRETS ACT",
+    },
+    ("eu", "2016", "reg", "679"): {
+        "source": eurlex_acquire, "eli": "reg/2016/679",
+        "consolidated": "2016-05-04",
+        "title": "Regulation (EU) 2016/679 - General Data Protection Regulation"
+                 " (GDPR)",
+        "aliases": "GDPR,RGPD,GENERAL DATA PROTECTION REGULATION,"
+                   "REGULATION (EU) 2016/679,REG 2016/679",
+    },
+    ("de", "1953", "title", "6"): {
+        "source": delcode_acquire, "title_no": "6", "chapters": ["c027"],
+        "title": "Delaware Code Title 6 - Commerce and Trade (partial: ch. 27"
+                 " Contracts)",
+        "aliases": "6 DEL C,6 DEL. C.,DELAWARE TITLE 6,DEL CODE TITLE 6",
+    },
+    ("de", "1953", "title", "10"): {
+        "source": delcode_acquire, "title_no": "10", "chapters": ["c057"],
+        "title": "Delaware Code Title 10 - Courts and Judicial Procedure"
+                 " (partial: ch. 57 Uniform Arbitration Act)",
+        "aliases": "10 DEL C,10 DEL. C.,DELAWARE TITLE 10,DELAWARE UNIFORM"
+                   " ARBITRATION ACT",
     },
 }
 
@@ -905,6 +1194,25 @@ def q_resolve(con, citation):
         year, num, sec, version = m.groups()
         expr = expression_for(con, f"ie/{year}/act/{num}", version)
         return {"id": _fragment_id(con, expr, sec) if sec else expr}
+    m = re.search(r"legislation\.gov\.uk/(ukpga|uksi|asp|nisi|anaw|asc)/(\d{4})/(\d+)"
+                  r"(?:/section/(\w+))?", c)
+    if m:
+        wtype, year, num, sec = m.groups()
+        expr = expression_for(con, f"uk/{year}/{wtype}/{num}", "revised")
+        return {"id": _fragment_id(con, expr, sec) if sec else expr}
+    m = re.search(r"eur-lex\.europa\.eu/eli/(reg|dir|dec|dec_impl|reg_impl)/(\d{4})/(\d+)"
+                  r"(?:.*?/art_(\d+))?", c)
+    if m:
+        wtype, year, num, art = m.groups()
+        expr = expression_for(con, f"eu/{year}/{wtype}/{num}", "consolidated")
+        return {"id": _fragment_id(con, expr, art) if art else expr}
+    m = re.search(r"\b(\d{1,2})\s*Del\.?\s*C\.?\s*§*\s*(\d+[A-Za-z]*)", c)
+    if m:
+        row = con.execute("SELECT id FROM works WHERE jurisdiction = 'de' AND"
+                          " number = ?", (m.group(1),)).fetchone()
+        if row:
+            expr = expression_for(con, row[0], "consolidated")
+            return {"id": _fragment_id(con, expr, m.group(2))}
     m = re.fullmatch(r"([\w-]+/\d{4}/[\w-]+/[\w-]+)(@[\w:.-]+)?(#[\w.-]+)?", c)
     if m:
         path, version, frag = m.groups()
@@ -919,7 +1227,7 @@ def q_resolve(con, citation):
             expr = expression_for(con, row[0], "consolidated")
             return {"id": _fragment_id(con, expr, f"{m.group(1)}-{m.group(2)}")}
     m = re.search(r"(?:(\d+)\s*U\.?S\.?C\.?|\bIRC\b)\s*§?\s*"
-                  r"(\d+[A-Za-z]*)", c)
+                  r"(\d+[A-Za-z]*(?:-\d+)?)", c)
     if m:
         title = m.group(1) or "26"
         row = con.execute("SELECT id FROM works WHERE type = 'usc' AND"
@@ -927,8 +1235,8 @@ def q_resolve(con, citation):
         if row:
             expr = expression_for(con, row[0], "consolidated")
             return {"id": _fragment_id(con, expr, m.group(2))}
-    m = re.search(r"(?:^|\b)(?:s\.?|section|art\.?|artigo)\s*"
-                  r"(\d+)(?:\.?º)?(?:\s*-\s*([A-Za-z]))?"
+    m = re.search(r"(?:^|\b)(?:s\.?|section|art\.?|article|artigo)\s*"
+                  r"(\d+[A-Z]*)(?:\.?º)?(?:\s*-\s*([A-Za-z]))?"
                   r"\s+(?:of\s+(?:the\s+)?|d[oa]\s+)?(.+)", c, re.IGNORECASE)
     if m:
         sec = m.group(1) + (f"-{m.group(2).upper()}" if m.group(2) else "")

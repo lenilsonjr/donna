@@ -28,9 +28,14 @@ drive it directly; `SKILL.md` teaches them how), `--json` makes every read
 verb machine-readable, and `donna mcp` serves the read verbs as MCP tools
 over stdio for hosts without a shell. `ingest` stays CLI-only by design.
 
-Status: M9 - five jurisdictions (IE, PT, BR, US federal, Wyoming), 17
-Expressions, ~5,550 fragments, three agent surfaces,
-signed attestations. Every ingest signs a canonical attestation payload with
+Status: M10 - eight jurisdictions (IE, PT, BR, US federal, Wyoming, UK,
+EU, Delaware), 33 Expressions, ~11,150 fragments, three agent surfaces,
+signed attestations. M10 added the contract-law pack a real cross-border
+engagement needed: legislation.gov.uk (Tier A CLML, pattern adapter for any
+UK act), EUR-Lex ELI (GDPR), the Delaware Code (partial coverage, declared),
+US titles 9, 17 and 18, and the Portuguese CIRS - and fixed two silent
+corpus defects on the way (GovInfo dash-encoded section numbers and a
+Wyoming header filter that had dropped two-thirds of Title 17). Every ingest signs a canonical attestation payload with
 an Ed25519 ingester key (sshsig, `ssh-keygen -Y`); `donna verify` recomputes
 every hash from the stored corpus and checks the signature, so a tampered
 fragment is named exactly and a doctored attestation fails verification.

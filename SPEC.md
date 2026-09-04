@@ -200,6 +200,45 @@ stays.
   matter layer (mike), not donna. Verification: run over the corpus; output
   lists real uningested diplomas with counts; `--json` parses.
 
+## M10 acceptance criteria (contract-law pack: UK, EU, Delaware, US 9/17/18, CIRS)
+
+Driver: a real set of cross-border consulting agreements (English law + LCIA,
+Delaware law + ICDR, Polish-law DPA on EU SCCs, US-federal references to
+17 USC 101, the DTSA and the FCPA, a Wyoming LLC signing from Lisbon). The
+corpus must be able to ground every governing-law clause they invoke.
+
+- **AC32** A legislation.gov.uk adapter (Tier A, CLML XML) MUST be a pattern
+  adapter for `uk/<year>/<type>/<n>`, ingesting `@revised` (label carries
+  `dct:valid`) and `@enacted`. Commentary and CommentaryRef annotations are
+  stripped and counted; Addition/Substitution/Repeal wrappers keep their
+  text (that is the revised statute). Sections are `#sec-<n>` including
+  alphanumerics (`#sec-6A`); schedules `#sched-<n>`. `ukm:BodyParagraphs`
+  is recorded as the declared count. Verification: Arbitration Act 1996,
+  Contracts (Rights of Third Parties) Act 1999, Late Payment Act 1998,
+  UCTA 1977, Limitation Act 1980 ingest with no numbering gaps; resolve
+  "s 46 Arbitration Act 1996"; quote verbatim + tampered.
+- **AC33** A EUR-Lex adapter (Tier B, ELI HTML) MUST ingest the GDPR as
+  `eu/2016/reg/679@consolidated:en` (and `@enacted` from the OJ), one
+  fragment per `eli-subdivision` article, with the 202-while-rendering
+  behaviour surfaced as a retryable error. Verification: 99 articles, no
+  gaps; resolve "art. 28 GDPR" and "Article 82 of Regulation (EU) 2016/679".
+- **AC34** A Delaware Code adapter (Tier B, delcode.delaware.gov) MUST
+  ingest registry-listed chapters of a Title, following subchapter pages,
+  cross-checking each page's own section TOC against parsed sections, and
+  MUST declare partial coverage in the title and in checks
+  (`"coverage": "partial"`, chapter list). Verification: 6 Del. C. ch. 27
+  and 10 Del. C. ch. 57; resolve "6 Del. C. § 2708".
+- **AC35** The GovInfo adapter MUST normalise dashes in section headings so
+  `§78dd–2` becomes fragment `78dd-2` rather than collapsing into `78dd`,
+  and MUST drop the tag opened at the note cut-point (no trailing `<p`).
+  Resolve MUST accept hyphenated USC sections. Verification: re-ingest
+  titles 15 and 26; "15 USC 78dd-2" resolves; no fragment text ends in `<p`.
+  Titles 9, 17 and 18 join the registry on the same adapter.
+- **AC36** The Portal das Finanças adapter MUST ingest the CIRS
+  (`pt/1988/dec-lei/442-a`) as a second configured work with no code change
+  beyond the registry entry. Verification: ingest checks; resolve
+  "art. 20.º CIRS".
+
 ## Derived artifacts (AC31)
 
 - **AC31** LLM-produced transcriptions of anchored image assets MUST live in
@@ -249,8 +288,10 @@ feed - `donna check` re-acquires an Expression's source without writing and
 reports source-level vs content-level change against the stored corpus; the
 seed of watch/subscriptions. M7 proceeds while M6 awaits Q2. M8: corpus expansion - per-Work source
 registry, PGDL + Planalto + USLM adapters, the PT civil-liberties pack, the
-BR election pack, US tax; case law explicitly out of scope. Later milestones
-are shells on purpose; detail lands when a milestone unblocks.
+BR election pack, US tax; case law explicitly out of scope. M9: annexes and
+`refs` discovery. M10: contract-law pack - legislation.gov.uk, EUR-Lex and
+Delaware Code adapters, US titles 9/17/18, CIRS. Later milestones are
+shells on purpose; detail lands when a milestone unblocks.
 
 ## Suggested technical approach
 
