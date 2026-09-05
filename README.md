@@ -72,9 +72,13 @@ the contract; its first rule is *never quote ingested law from memory*.
   fragment hashes, and a raw-bytes hash of everything fetched.
 - **Provenance**: every ingest writes an attestation (source URL, fetch
   time, parser id, structure-check results) and signs it with an Ed25519
-  ingester key via `ssh-keygen -Y`. `donna verify` replays the whole chain:
-  a tampered fragment is named exactly, a doctored attestation fails its
-  signature, and full forgery requires the private key.
+  ingester key via `ssh-keygen -Y`. Trust roots live in a
+  `trusted_signers` file outside the corpus: `donna verify` reports
+  unsigned, signed-untrusted or signed-trusted, and `--require-trusted`
+  makes authentication mandatory. The signed manifest binds every
+  fragment's identity, heading, order and text hash, so a tampered or
+  renamed fragment is named exactly and a re-signed forgery is not
+  authenticated.
 - **Honest extraction**: adapters are tiered. A: structured XML/APIs
   (Irish Statute Book, Law Reform Commission, legislation.gov.uk CLML).
   B: HTML scraping with structure checks (Portal das Finanças, PGDL,
@@ -117,7 +121,8 @@ Nothing here is legal advice, and no case law is included by design.
 
 ## Design notes
 
-Single-file Python, stdlib only, ~1,800 lines. SQLite with FTS5. The spec
+Single-file Python, stdlib only, ~1,900 lines, with a no-network
+regression suite under `tests/`. SQLite with FTS5. The spec
 (`SPEC.md`) carries the terminology, the acceptance criteria per milestone
 (all passing), and the open questions with priced options. The name is from
 Suits: donna is the one who knows where everything is and never guesses.

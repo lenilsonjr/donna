@@ -251,6 +251,22 @@ corpus must be able to ground every governing-law clause they invoke.
   the Portaria 94/96 Mapa transcription, cross-checked against the DL 15/93
   schedules the corpus already holds.
 
+## M11 acceptance criteria (LAB-25 audit remediation)
+
+The criteria live in Linear ticket LAB-25 (2026-09-05 audit, eight findings);
+this page records only what changed. Trust roots moved out of the corpus
+(`.donna/trusted_signers`; verify reports unsigned / signed-untrusted /
+signed-trusted and `--require-trusted` enforces authentication). Hash format
+2 binds kind, number, heading, order and text per fragment into the signed
+manifest; legacy format-1 attestations verify as such. Ingestion gates on
+zero fragments, unparsed pages and missing TOC entries (`--allow-defects`
+overrides, recorded). Changed consolidated content mints an immutable dated
+expression id and preserves history; unchanged re-ingest stays idempotent.
+Explicit version requests (URLs, id paths) resolve strictly or fail;
+canonical ids are validated for existence; search errors are structured and
+cannot kill the MCP server; empty quotations are rejected. The regression
+suite in `tests/` covers all eight findings without network access.
+
 ## Open questions
 
 - **Q1** ANSWERED at M5 build start (2026-09-01): sshsig - `ssh-keygen -Y`

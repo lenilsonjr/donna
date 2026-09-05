@@ -80,6 +80,7 @@ def sha256(data):
 
 def canonical(text):
     text = unicodedata.normalize("NFC", text).replace("\u00a0", " ")
+    text = text.replace("\u200b", "").replace("\ufeff", "")
     lines = [re.sub(r"[ \t]+", " ", l).strip() for l in text.splitlines()]
     return "\n".join(l for l in lines if l)
 
@@ -133,18 +134,53 @@ def sign_payload(payload):
         kt_b64 = " ".join(fh.read().split()[:2])
     return sig, kt_b64
 
-def verify_signature(payload, sig, signer):
+def _trusted_signers_path():
+    return os.path.join(KEY_DIR, "trusted_signers")
+
+def _ensure_trusted_file():
+    """Trust roots live in the filesystem, never in the corpus being verified.
+    Bootstraps from the local ingester public key when present."""
+    path = _trusted_signers_path()
+    if os.path.exists(path):
+        return path
+    _, pub = _key_paths()
+    if os.path.exists(pub):
+        os.makedirs(KEY_DIR, exist_ok=True)
+        with open(pub) as fh:
+            kt_b64 = " ".join(fh.read().split()[:2])
+        with open(path, "w") as fh:
+            fh.write(f"donna-ingester {kt_b64}\n")
+        print(f"trusted_signers bootstrapped from local key: {path}",
+              file=sys.stderr)
+        return path
+    return None
+
+def _sshsig_verify(payload, sig, allowed_line_or_file, is_file=False):
     with tempfile.TemporaryDirectory() as td:
-        allowed = os.path.join(td, "allowed_signers")
         sigf = os.path.join(td, "payload.sig")
-        with open(allowed, "w") as fh:
-            fh.write(f"donna-ingester {signer}\n")
         with open(sigf, "w") as fh:
             fh.write(sig)
+        allowed = allowed_line_or_file
+        if not is_file:
+            allowed = os.path.join(td, "allowed_signers")
+            with open(allowed, "w") as fh:
+                fh.write(f"donna-ingester {allowed_line_or_file}\n")
         r = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", allowed,
                             "-I", "donna-ingester", "-n", SIG_NAMESPACE,
                             "-s", sigf], input=payload, capture_output=True)
     return r.returncode == 0, (r.stderr or r.stdout).decode().strip()
+
+def verify_signature(payload, sig, signer):
+    """-> (signature_ok, trusted, detail). The signature is checked against the
+    embedded signer key (payload integrity) and independently against the
+    trusted_signers file (provenance authentication)."""
+    trusted_file = _ensure_trusted_file()
+    if trusted_file:
+        ok, detail = _sshsig_verify(payload, sig, trusted_file, is_file=True)
+        if ok:
+            return True, True, detail
+    ok, detail = _sshsig_verify(payload, sig, signer)
+    return ok, False, detail
 
 # ---------------------------------------------------------------- Ireland adapter
 
@@ -248,7 +284,7 @@ def ie_acquire(year, wtype, num, version):
 
 # ---------------------------------------------------------------- Portugal adapter
 
-PT_PARSER = "donna-pt/0.6.0"
+PT_PARSER = "donna-pt/0.8.0"
 PT_BASE = "https://info.portaldasfinancas.gov.pt"
 
 class _PTBlocks(HTMLParser):
@@ -353,7 +389,10 @@ def pt_at_acquire(cfg, version):
     index_raw = fetch(cfg["index"])
     index_html = index_raw.decode("utf-8", errors="replace")
     seen, pages = set(), []
-    for m in re.finditer(r'href="([^"]*?/pages/%s(\d+)([a-z]?)\.aspx)"' % cfg["slug"],
+    base = re.sub(r"^https?://[^/]+", "", cfg["index"])
+    base = re.split(r"/pages/", base, flags=re.IGNORECASE)[0]
+    for m in re.finditer(r'href="(%s/pages/%s(\d+)([a-z]?)\.aspx)"'
+                         % (re.escape(base), cfg["slug"]),
                          index_html, re.IGNORECASE):
         href, digits, letter = m.groups()
         number = digits + (f"-{letter.upper()}" if letter else "")
@@ -1103,19 +1142,71 @@ def _acquire(work_path):
     version = version or "enacted"
     return work_id, version, adapter(year, wtype, num, version)
 
-def _expression_hashes(fragments):
-    frag_hashes = [sha256(f["text"]) for f in fragments]
-    return frag_hashes, sha256("\n".join(frag_hashes))
+HASH_FORMAT = 2
 
-def ingest(con, work_path):
+def _expression_hashes(fragments, hash_format=HASH_FORMAT):
+    """Format 2 binds identity to content: kind, number, heading, order and
+    text hash per fragment. Format 1 (legacy) covered ordered text hashes only."""
+    frag_hashes = [sha256(f["text"]) for f in fragments]
+    if hash_format == 1:
+        return frag_hashes, sha256("\n".join(frag_hashes))
+    lines = [f"{f['kind']}|{f['number']}|{sha256(f['heading'] or '')}|{h}"
+             for f, h in zip(fragments, frag_hashes)]
+    return frag_hashes, sha256("\n".join(lines))
+
+def _stored_hash_format(con, expr_id):
+    row = con.execute("SELECT payload_json FROM attestations WHERE"
+                      " expression_id = ? ORDER BY id DESC", (expr_id,)).fetchone()
+    if row and row[0]:
+        return json.loads(row[0]).get("hash_format", 1)
+    return 1
+
+def _gate_ingest(res):
+    """Extraction failures must never overwrite stored law (LAB-25 F3)."""
+    reasons = []
+    if not res["fragments"]:
+        reasons.append("zero fragments extracted")
+    for key in ("unparsed_pages", "toc_missing"):
+        if res["checks"].get(key):
+            reasons.append(f"{key}: {res['checks'][key]}")
+    return reasons
+
+def ingest(con, work_path, allow_defects=False):
     try:
         work_id, version, res = _acquire(work_path)
     except DonnaError as e:
         sys.exit(str(e))
     fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+    gate = _gate_ingest(res)
+    if gate and not allow_defects:
+        sys.exit("ingest refused, stored corpus preserved (--allow-defects to"
+                 " override):\n  - " + "\n  - ".join(gate))
+    if gate:
+        res["checks"]["gate_overridden"] = gate
+
     expr_id = f"{work_id}@{res['label']}:{res['lang']}"
     frag_hashes, expr_hash = _expression_hashes(res["fragments"])
+    existing = con.execute("SELECT content_hash FROM expressions WHERE id = ?",
+                           (expr_id,)).fetchone()
+    if existing and existing[0] != expr_hash:
+        # immutable version identities (LAB-25 F4): never overwrite changed text
+        if res["label"].startswith("consolidated"):
+            dated = f"consolidated-{fetched_at[:10]}"
+            dated_id = f"{work_id}@{dated}:{res['lang']}"
+            clash = con.execute("SELECT content_hash FROM expressions WHERE"
+                                " id = ?", (dated_id,)).fetchone()
+            if clash and clash[0] != expr_hash:
+                sys.exit(f"conflicting content for {dated_id} on the same day;"
+                         " investigate with 'donna check' before re-ingesting")
+            res["label"], expr_id = dated, dated_id
+            print(f"content changed: prior expression preserved, new version"
+                  f" {expr_id}", file=sys.stderr)
+        else:
+            sys.exit(f"content changed under immutable version {expr_id};"
+                     " a dated version id is required — investigate with"
+                     " 'donna check'")
+
     frag_rows = []
     for i, (f, h) in enumerate(zip(res["fragments"], frag_hashes)):
         fid = f"{expr_id}#{KIND_PREFIX[f['kind']]}-{f['number']}"
@@ -1139,8 +1230,8 @@ def ingest(con, work_path):
         payload = json.dumps(
             {"expression_id": expr_id, "source_url": res["source_url"],
              "fetched_at": fetched_at, "raw_sha256": sha256(res["raw"]),
-             "content_hash": expr_hash, "parser": res["parser"],
-             "checks": res["checks"]},
+             "content_hash": expr_hash, "hash_format": HASH_FORMAT,
+             "parser": res["parser"], "checks": res["checks"]},
             sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         sig, signer = sign_payload(payload.encode())
         con.execute("INSERT INTO attestations(expression_id, source_url, fetched_at,"
@@ -1164,7 +1255,10 @@ def acronym(title):
              and w.upper() not in ("OF", "AND", "THE", "AN", "A", "ACT")]
     return "".join(w[0].upper() for w in words) + "A"  # DATA PROTECTION -> DPA
 
-def expression_for(con, work_id, version):
+def expression_for(con, work_id, version, strict=False):
+    """Version-prefix match (shorthand like 'revised' expands to the latest
+    dated revision). strict=True is for explicit version requests: no
+    fall-back to whatever happens to be ingested (LAB-25 F5)."""
     row = con.execute("SELECT id FROM expressions WHERE work_id = ? AND version"
                       " LIKE ? ORDER BY version DESC",
                       (work_id, version + "%")).fetchone()
@@ -1172,7 +1266,7 @@ def expression_for(con, work_id, version):
         return row[0]
     rows = con.execute("SELECT id FROM expressions WHERE work_id = ?",
                        (work_id,)).fetchall()
-    if len(rows) == 1:  # Q6 interim rule: fall back to the only Expression
+    if not strict and len(rows) == 1:  # Q6 rule: unqualified citations only
         return rows[0][0]
     if rows:
         raise DonnaError(f"no {version} expression for {work_id!r}; have: "
@@ -1192,13 +1286,20 @@ def q_resolve(con, citation):
                   r"/eli/(\d{4})/act/(\d+)(?:/section/(\d+\w*))?/(enacted|revised)", c)
     if m:
         year, num, sec, version = m.groups()
-        expr = expression_for(con, f"ie/{year}/act/{num}", version)
+        expr = expression_for(con, f"ie/{year}/act/{num}", version, strict=True)
         return {"id": _fragment_id(con, expr, sec) if sec else expr}
     m = re.search(r"legislation\.gov\.uk/(ukpga|uksi|asp|nisi|anaw|asc)/(\d{4})/(\d+)"
-                  r"(?:/section/(\w+))?", c)
+                  r"(?:/section/(\w+?))?"
+                  r"(?:/(enacted|made|\d{4}-\d{2}-\d{2}))?(?:[?#]|$|\s)", c)
     if m:
-        wtype, year, num, sec = m.groups()
-        expr = expression_for(con, f"uk/{year}/{wtype}/{num}", "revised")
+        wtype, year, num, sec, uver = m.groups()
+        if uver in ("enacted", "made"):
+            want = "enacted"
+        elif uver:  # explicit point-in-time
+            want = f"revised-{uver}"
+        else:
+            want = "revised"
+        expr = expression_for(con, f"uk/{year}/{wtype}/{num}", want, strict=True)
         return {"id": _fragment_id(con, expr, sec) if sec else expr}
     m = re.search(r"eur-lex\.europa\.eu/eli/(reg|dir|dec|dec_impl|reg_impl)/(\d{4})/(\d+)"
                   r"(?:.*?/art_(\d+))?", c)
@@ -1213,11 +1314,26 @@ def q_resolve(con, citation):
         if row:
             expr = expression_for(con, row[0], "consolidated")
             return {"id": _fragment_id(con, expr, m.group(2))}
-    m = re.fullmatch(r"([\w-]+/\d{4}/[\w-]+/[\w-]+)(@[\w:.-]+)?(#[\w.-]+)?", c)
+    m = re.fullmatch(r"([\w-]+/\d{4}/[\w-]+/[\w-]+)(?:@([\w:.-]+))?(#[\w.-]+)?", c)
     if m:
         path, version, frag = m.groups()
-        expr = f"{path}{version}" if version else expression_for(con, path, "enacted")
-        return {"id": f"{expr}{frag or ''}"}
+        if version:
+            exact = f"{path}@{version}"
+            if con.execute("SELECT 1 FROM expressions WHERE id = ?",
+                           (exact,)).fetchone():
+                expr = exact
+            else:  # expand shorthand like @revised strictly (LAB-25 F6)
+                expr = expression_for(con, path, version.split(":")[0],
+                                      strict=True)
+        else:
+            expr = expression_for(con, path, "enacted")
+        if frag:
+            fid = f"{expr}{frag}"
+            if not con.execute("SELECT 1 FROM fragments WHERE id = ?",
+                               (fid,)).fetchone():
+                raise DonnaError(f"unknown fragment {fid!r}")
+            return {"id": fid}
+        return {"id": expr}
     m = re.search(r"(?:W\.?S\.?\s*)?\b(\d{1,2}(?:\.\d+)?)-(\d+(?:\.\d+)?-\d+)\b", c)
     if m:
         tnum = m.group(1).replace(".", "-")
@@ -1311,6 +1427,8 @@ def q_versions(con, work_path):
 def q_quote(con, fid, text):
     _, _, body, _, _ = get_fragment(con, fid)
     needle, hay = quote_normal(text), quote_normal(body)
+    if not needle:
+        raise DonnaError("empty quotation cannot be verified")
     if needle in hay:
         return {"verified": True, "fragment": fid}
     words = hay.split()
@@ -1322,11 +1440,27 @@ def q_quote(con, fid, text):
         out["nearest"] = best[0][:300]
     return out
 
+def _fts(con, q):
+    return con.execute("SELECT id, heading, snippet(fragments_fts, 2, '[', ']',"
+                       " '…', 12) FROM fragments_fts WHERE fragments_fts MATCH ?"
+                       " ORDER BY rank LIMIT 10", (q,)).fetchall()
+
 def q_search(con, query):
+    if not query.strip():
+        raise DonnaError("empty search query")
     if HAS_FTS:
-        rows = con.execute("SELECT id, heading, snippet(fragments_fts, 2, '[', ']',"
-                           " '…', 12) FROM fragments_fts WHERE fragments_fts MATCH ?"
-                           " ORDER BY rank LIMIT 10", (query,)).fetchall()
+        try:
+            rows = _fts(con, query)
+        except sqlite3.OperationalError:
+            # ordinary terms like cross-border are FTS syntax; quote per token
+            safe = " ".join('"' + t.replace('"', '') + '"'
+                            for t in query.split() if t.replace('"', ''))
+            if not safe:
+                raise DonnaError("empty search query")
+            try:
+                rows = _fts(con, safe)
+            except sqlite3.OperationalError as e:
+                raise DonnaError(f"invalid search query: {e}")
     else:
         rows = con.execute("SELECT id, heading, substr(text, 1, 80) FROM fragments"
                            " WHERE text LIKE ? LIMIT 10", (f"%{query}%",)).fetchall()
@@ -1340,28 +1474,44 @@ def q_diff(con, a, b):
     return {"a": a, "b": b, "identical": not out, "diff": "\n".join(out)}
 
 def q_verify(con, expr_id):
-    expr = con.execute("SELECT content_hash FROM expressions WHERE id = ?",
-                       (expr_id,)).fetchone()
+    expr = con.execute("SELECT content_hash, source_url FROM expressions WHERE"
+                       " id = ?", (expr_id,)).fetchone()
     if not expr:
         raise DonnaError(f"unknown expression {expr_id!r}")
-    rows = con.execute("SELECT id, text, content_hash FROM fragments WHERE"
-                       " expression_id = ? ORDER BY ord", (expr_id,)).fetchall()
-    mismatches = [fid for fid, text, h in rows if sha256(text) != h]
-    expr_ok = sha256("\n".join(h for _, _, h in rows)) == expr[0]
+    rows = con.execute("SELECT id, kind, number, heading, text, content_hash"
+                       " FROM fragments WHERE expression_id = ? ORDER BY ord",
+                       (expr_id,)).fetchall()
+    mismatches = [fid for fid, _, _, _, text, h in rows if sha256(text) != h]
+    frags = [{"kind": k, "number": n, "heading": hd, "text": t}
+             for _, k, n, hd, t, _ in rows]
     att_row = con.execute("SELECT payload_json, signature, signer FROM attestations"
                           " WHERE expression_id = ? ORDER BY id DESC",
                           (expr_id,)).fetchone()
-    att = {"present": bool(att_row), "signed": False}
-    if att_row and att_row[0]:
-        att["payload_matches_corpus"] = \
-            json.loads(att_row[0]).get("content_hash") == expr[0]
+    payload = json.loads(att_row[0]) if att_row and att_row[0] else {}
+    fmt = payload.get("hash_format", 1)
+    _, computed = _expression_hashes(frags, hash_format=fmt)
+    expr_ok = computed == expr[0]
+    att = {"present": bool(att_row), "signed": False, "trust": "unsigned",
+           "hash_format": fmt}
+    authenticated = False
+    if payload:
+        att["payload_matches_corpus"] = (
+            payload.get("content_hash") == expr[0]
+            and payload.get("expression_id", expr_id) == expr_id
+            and payload.get("source_url", expr[1]) == expr[1])
         if att_row[1]:
-            ok, detail = verify_signature(att_row[0].encode(), att_row[1], att_row[2])
-            att.update(signed=True, signature_ok=ok, detail=detail)
+            sig_ok, trusted, detail = verify_signature(
+                att_row[0].encode(), att_row[1], att_row[2])
+            authenticated = sig_ok and trusted
+            att.update(signed=True, signature_ok=sig_ok, detail=detail,
+                       trust="signed-trusted" if authenticated
+                       else "signed-untrusted" if sig_ok
+                       else "signature-invalid")
     ok = (not mismatches and expr_ok
           and att.get("payload_matches_corpus", True)
           and att.get("signature_ok", True))
-    return {"expression": expr_id, "ok": ok, "fragments_checked": len(rows),
+    return {"expression": expr_id, "ok": ok, "authenticated": authenticated,
+            "fragments_checked": len(rows),
             "fragment_mismatches": mismatches, "expression_hash_ok": expr_ok,
             "attestation": att}
 
@@ -1374,7 +1524,8 @@ def q_check(con, work_path):
         raise DonnaError(f"no {version} expression ingested for {work_id!r}"
                          " — nothing to compare against")
     stored_id, stored_hash = row
-    _, expr_hash = _expression_hashes(res["fragments"])
+    _, expr_hash = _expression_hashes(res["fragments"],
+                                      hash_format=_stored_hash_format(con, stored_id))
     att = con.execute("SELECT raw_sha256 FROM attestations WHERE expression_id = ?"
                       " ORDER BY id DESC", (stored_id,)).fetchone()
     raw_now = sha256(res["raw"])
@@ -1576,6 +1727,10 @@ def cmd_mcp(con):
             except (DonnaError, KeyError) as e:
                 result = {"content": [{"type": "text", "text": str(e)}],
                           "isError": True}
+            except Exception as e:  # never let a tool call kill the server
+                result = {"content": [{"type": "text",
+                                       "text": f"{type(e).__name__}: {e}"}],
+                          "isError": True}
             send({"jsonrpc": "2.0", "id": mid, "result": result})
         elif method == "ping":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
@@ -1612,7 +1767,10 @@ def main():
     ap.add_argument("--json", action="store_true",
                     help="emit machine-readable JSON on stdout")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("ingest").add_argument("work")
+    ing = sub.add_parser("ingest")
+    ing.add_argument("work")
+    ing.add_argument("--allow-defects", action="store_true",
+                     help="commit despite failed structure checks (recorded)")
     sub.add_parser("resolve").add_argument("citation")
     sub.add_parser("versions").add_argument("work")
     sub.add_parser("text").add_argument("id")
@@ -1622,7 +1780,10 @@ def main():
     d = sub.add_parser("diff"); d.add_argument("a"); d.add_argument("b")
     sub.add_parser("mcp")
     sub.add_parser("keygen")
-    sub.add_parser("verify").add_argument("expression")
+    vf = sub.add_parser("verify")
+    vf.add_argument("expression")
+    vf.add_argument("--require-trusted", action="store_true",
+                    help="exit 1 unless the attestation is signed by a trusted key")
     sub.add_parser("check").add_argument("work")
     sub.add_parser("refs").add_argument("scope", nargs="?")
     dv = sub.add_parser("derive")
@@ -1642,10 +1803,11 @@ def main():
         subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", key, "-N", "",
                         "-C", "donna-ingester", "-q"], check=True)
         print(f"ingester key created: {key}")
+        _ensure_trusted_file()
         return
     con = db_open(args.db)
     if args.cmd == "ingest":
-        ingest(con, args.work)
+        ingest(con, args.work, allow_defects=args.allow_defects)
         return
     if args.cmd == "mcp":
         cmd_mcp(con)
@@ -1688,7 +1850,8 @@ def main():
             sys.exit(1)
         if args.cmd == "search" and not out["results"]:
             sys.exit(1)
-        if args.cmd == "verify" and not out["ok"]:
+        if args.cmd == "verify" and (not out["ok"] or
+                (args.require_trusted and not out["authenticated"])):
             sys.exit(1)
         if args.cmd == "check" and out["content_changed"]:
             sys.exit(2)
@@ -1721,16 +1884,14 @@ def main():
         print(out["diff"] or "identical")
     elif args.cmd == "verify":
         a = out["attestation"]
-        state = ("signature ok" if a.get("signature_ok")
-                 else "signed, SIGNATURE FAILED" if a.get("signed")
-                 else "unsigned")
         print(f"{out['expression']}\n  fragments: {out['fragments_checked']}"
               f" checked, {len(out['fragment_mismatches'])} mismatched\n"
-              f"  expression hash: {'ok' if out['expression_hash_ok'] else 'MISMATCH'}\n"
-              f"  attestation: {state}")
+              f"  expression hash: {'ok' if out['expression_hash_ok'] else 'MISMATCH'}"
+              f" (format {a['hash_format']})\n"
+              f"  attestation: {a['trust']}")
         if out["fragment_mismatches"]:
             print("  mismatched: " + ", ".join(out["fragment_mismatches"]))
-        if not out["ok"]:
+        if not out["ok"] or (args.require_trusted and not out["authenticated"]):
             sys.exit(1)
     elif args.cmd == "derive":
         print(f"stored {out['kind']} for {out['fragment']} ({out['stored']} chars)")
