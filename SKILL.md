@@ -63,6 +63,13 @@ Add `--json` before the verb for machine-readable output (same exit codes).
   `pt/2001/dec-lei/130-a`; Lei do Tabaco Lei 37/2007 `pt/2007/lei/37`
   (all `@consolidated:pt`, PGDL). Not on PGDL, so not ingested: Decreto
   Regulamentar 61/94 (licit market / hemp cultivation).
+- **Portugal (civil)**: Código Civil `pt/1966/dec-lei/47344` (2,382
+  articles — 483/496 responsabilidade e danos, 1207–1230 empreitada);
+  Código de Processo Civil `pt/2013/lei/41` (1,146 articles); Lei de Defesa
+  do Consumidor `pt/1996/lei/24`; conformidade de bens DL 84/2021
+  `pt/2021/dec-lei/84`; Julgados de Paz `pt/2001/lei/78` (all
+  `@consolidated:pt`, PGDL). Unqualified citations resolve to the latest
+  dated expression when a work carries re-ingest history.
 - **Brazil (elections)**: Código Eleitoral `br/1965/lei/4737`; Lei das
   Eleições `br/1997/lei/9504` (doações: art. 23); Lei dos Partidos
   `br/1995/lei/9096` (all `@consolidated:pt-BR`, Planalto).

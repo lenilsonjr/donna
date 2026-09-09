@@ -438,14 +438,14 @@ PGDL_URL = ("https://www.pgdlisboa.pt/leis/lei_mostra_articulado.php"
             "?nid={nid}&tabela=leis&ficha=1&pagina={p}")
 PGDL_HEADER = re.compile(
     r'<td class=txt_base_b_l[^>]*>.{0,200}?'
-    r'(?:Artigo\s+(\d+)\.º(?:-([A-Z]+))?'
+    r'(?:(?i:Artigo)\s+(\d+)\.º(?:-([A-Z]+))?(?:\s*\([^<)]{0,80}\))?'
     r'|(TABELA\s+[IVX]+(?:-[A-Z])?|ANEXO(?:\s+[IVX]+)?))'
-    r'\s*(?:<br>\s*([^<]*))?</td>', re.S)
+    r'\s*(?:<br>\s*([^<]*))?.{0,300}?</td>', re.S)
 PGDL_HEADER_POINTS = re.compile(  # portarias: bare numbered points + Mapa annex
     r'<td class=txt_base_b_l[^>]*>.{0,200}?'
-    r'(?:(\d+)\.º(?:-([A-Z]+))?'
+    r'(?:(\d+)\.º(?:-([A-Z]+))?(?:\s*\([^<)]{0,80}\))?'
     r'|(TABELA\s+[IVX]+(?:-[A-Z])?|ANEXO(?:\s+[IVX]+)?|MAPA|Mapa))'
-    r'\s*(?:<br>\s*([^<]*))?</td>', re.S)
+    r'\s*(?:<br>\s*([^<]*))?.{0,300}?</td>', re.S)
 
 def _pgdl_clean(chunk, counts):
     chunk = re.sub(r'<td class=txt_11_b_l.*?</td>',
@@ -465,20 +465,38 @@ def pgdl_acquire(cfg, version):
     raw = fetch(PGDL_URL.format(nid=cfg["nid"], p=1))
     raws.append(raw)
     pages.append(raw.decode("iso-8859-1", errors="replace"))
-    # follow the site's own pager hrefs (ficha=, not pagina=, drives the offset)
-    pager, seen_p = [], set()
-    for m in re.finditer(r"href='(lei_mostra_articulado\.php\?[^']*nid=%s[^']*)'"
-                         % cfg["nid"], pages[0]):
-        href = m.group(1)
-        pm = re.search(r"pagina=(\d+)", href)
-        if pm and int(pm.group(1)) > 1 and pm.group(1) not in seen_p:
-            seen_p.add(pm.group(1))
-            pager.append((int(pm.group(1)), href))
-    for _, href in sorted(pager):
-        time.sleep(0.3)
-        raw = fetch("https://www.pgdlisboa.pt/leis/" + html.unescape(href))
+    # follow the site's own pager hrefs (ficha=, not pagina=, drives the
+    # offset) and keep harvesting from every fetched page: on long codes the
+    # first page's pager window does not list all pages
+    hrefs, done = {}, {1}
+    def _harvest(page_text):
+        for m in re.finditer(r"href='(lei_mostra_articulado\.php\?[^']*nid=%s"
+                             r"[^']*)'" % cfg["nid"], page_text):
+            pm = re.search(r"pagina=(\d+)", m.group(1))
+            if pm:
+                hrefs.setdefault(int(pm.group(1)), m.group(1))
+    _harvest(pages[0])
+    while True:
+        todo = sorted(p for p in hrefs if p not in done)
+        if not todo:
+            break
+        if len(done) > 80:
+            raise DonnaError("pager runaway: more than 80 pages discovered")
+        p = todo[0]
+        done.add(p)
+        time.sleep(0.5)
+        url = "https://www.pgdlisboa.pt/leis/" + html.unescape(hrefs[p])
+        for attempt in (2, 5, 0):
+            try:
+                raw = fetch(url)
+                break
+            except OSError:
+                if not attempt:
+                    raise
+                time.sleep(attempt)
         raws.append(raw)
         pages.append(raw.decode("iso-8859-1", errors="replace"))
+        _harvest(pages[-1])
     expected = []
     toc_re = (r'<option value="%sA\d+">(?:Artigo\s+)?(\d+)\.º(?:-([A-Z]+))?'
               if cfg.get("points") else
@@ -1099,6 +1117,32 @@ WORKS = {
         "title": "Lei do Tabaco - exposição ao fumo ambiental (Lei n.º 37/2007)",
         "aliases": "LEI DO TABACO,LEI 37/2007,LEI ANTI-TABACO",
     },
+    ("pt", "1966", "dec-lei", "47344"): {
+        "source": pgdl_acquire, "nid": "775",
+        "title": "Código Civil (DL n.º 47344/66)",
+        "aliases": "CC,CODIGO CIVIL,CÓDIGO CIVIL",
+    },
+    ("pt", "2013", "lei", "41"): {
+        "source": pgdl_acquire, "nid": "1959",
+        "title": "Código de Processo Civil (Lei n.º 41/2013)",
+        "aliases": "CPC,CODIGO DE PROCESSO CIVIL,CÓDIGO DE PROCESSO CIVIL",
+    },
+    ("pt", "1996", "lei", "24"): {
+        "source": pgdl_acquire, "nid": "726",
+        "title": "Lei de Defesa do Consumidor (Lei n.º 24/96)",
+        "aliases": "LDC,LEI DE DEFESA DO CONSUMIDOR",
+    },
+    ("pt", "2021", "dec-lei", "84"): {
+        "source": pgdl_acquire, "nid": "3471",
+        "title": "Compra e Venda de Bens, Conteúdos e Serviços Digitais -"
+                 " conformidade (DL n.º 84/2021)",
+        "aliases": "DL 84/2021,BENS DE CONSUMO",
+    },
+    ("pt", "2001", "lei", "78"): {
+        "source": pgdl_acquire, "nid": "724",
+        "title": "Lei dos Julgados de Paz (Lei n.º 78/2001)",
+        "aliases": "JULGADOS DE PAZ,LJP,LEI DOS JULGADOS DE PAZ",
+    },
     ("us", "1947", "usc", "9"): {
         "source": govinfo_acquire, "package": "USCODE-2023-title9",
         "title": "United States Code Title 9 - Arbitration (Federal Arbitration"
@@ -1294,6 +1338,17 @@ def expression_for(con, work_id, version, strict=False):
                          + ", ".join(r[0] for r in rows))
     raise DonnaError(f"no expressions ingested for {work_id!r}")
 
+def _default_expression(con, work_id):
+    """Unqualified citations get the work's current expression: enacted when
+    one exists, else the latest consolidated, else the only expression."""
+    for pref in ("enacted", "consolidated"):
+        row = con.execute("SELECT id FROM expressions WHERE work_id = ? AND"
+                          " version LIKE ? ORDER BY version DESC",
+                          (work_id, pref + "%")).fetchone()
+        if row:
+            return row[0]
+    return expression_for(con, work_id, "enacted")
+
 def _fragment_id(con, expr, sec):
     for prefix in ("sec", "art"):
         fid = f"{expr}#{prefix}-{sec}"
@@ -1333,7 +1388,7 @@ def q_resolve(con, citation):
         row = con.execute("SELECT id FROM works WHERE jurisdiction = 'de' AND"
                           " number = ?", (m.group(1),)).fetchone()
         if row:
-            expr = expression_for(con, row[0], "consolidated")
+            expr = _default_expression(con, row[0])
             return {"id": _fragment_id(con, expr, m.group(2))}
     m = re.fullmatch(r"([\w-]+/\d{4}/[\w-]+/[\w-]+)(?:@([\w:.-]+))?(#[\w.-]+)?", c)
     if m:
@@ -1361,7 +1416,7 @@ def q_resolve(con, citation):
         row = con.execute("SELECT id FROM works WHERE jurisdiction = 'wy' AND"
                           " number = ?", (tnum,)).fetchone()
         if row:
-            expr = expression_for(con, row[0], "consolidated")
+            expr = _default_expression(con, row[0])
             return {"id": _fragment_id(con, expr, f"{m.group(1)}-{m.group(2)}")}
     m = re.search(r"(?:(\d+)\s*U\.?S\.?C\.?|\bIRC\b)\s*§?\s*"
                   r"(\d+[A-Za-z]*(?:-\d+)?)", c)
@@ -1370,7 +1425,7 @@ def q_resolve(con, citation):
         row = con.execute("SELECT id FROM works WHERE type = 'usc' AND"
                           " number = ?", (title,)).fetchone()
         if row:
-            expr = expression_for(con, row[0], "consolidated")
+            expr = _default_expression(con, row[0])
             return {"id": _fragment_id(con, expr, m.group(2))}
     m = re.search(r"(?:^|\b)(?:s\.?|section|art\.?|article|artigo)\s*"
                   r"(\d+[A-Z]*)(?:\.?º)?(?:\s*-\s*([A-Za-z]))?"
@@ -1397,7 +1452,7 @@ def q_resolve(con, citation):
                           " AND number = ? AND year = ?",
                           (ptype, pm.group(2).lower(), pyear)).fetchone()
         if row:
-            expr = expression_for(con, row[0], "consolidated")
+            expr = _default_expression(con, row[0])
             return {"id": _fragment_id(con, expr, sec) if sec else expr}
     ym = re.search(r"(\d{4})\s*$", name)
     year = int(ym.group(1)) if ym else None
@@ -1410,7 +1465,7 @@ def q_resolve(con, citation):
         if name_key and name_key not in title.upper() \
                 and name_key != acronym(title) and name_key not in candidates:
             continue
-        expr = expression_for(con, work_id, "enacted")
+        expr = _default_expression(con, work_id)
         return {"id": _fragment_id(con, expr, sec) if sec else expr}
     raise DonnaError(f"cannot resolve {citation!r}")
 
