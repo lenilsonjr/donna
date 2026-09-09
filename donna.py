@@ -517,7 +517,10 @@ def pgdl_acquire(cfg, version):
                 # scanned annexes are served as images; anchor their bytes
                 lines = []
                 for src_m in re.finditer(r"<img src='([^']+)'", chunk):
-                    href = src_m.group(1).replace("../", "")
+                    # src is relative to /leis/ ('../leis/x.gif' or ' imagens/x.gif')
+                    href = src_m.group(1).strip().replace("../", "")
+                    if not href.startswith("leis/"):
+                        href = "leis/" + href
                     img = fetch("https://www.pgdlisboa.pt/" + href.replace(" ", "%20"))
                     raws.append(img)
                     name = href.rsplit("/", 1)[-1]
@@ -1078,6 +1081,24 @@ WORKS = {
                  " (Lei n.º 44/86)",
         "aliases": "ESTADO DE EMERGENCIA,ESTADO DE EMERGÊNCIA,ESTADO DE SITIO",
     },
+    ("pt", "1982", "dec-lei", "433"): {
+        "source": pgdl_acquire, "nid": "166",
+        "title": "Regime Geral das Contra-Ordenações (DL n.º 433/82)",
+        "aliases": "RGCO,REGIME GERAL DAS CONTRA-ORDENACOES,"
+                   "REGIME GERAL DAS CONTRA-ORDENAÇÕES,DL 433/82",
+    },
+    ("pt", "2001", "dec-lei", "130-a"): {
+        "source": pgdl_acquire, "nid": "193",
+        "title": "Comissões para a Dissuasão da Toxicodependência - organização"
+                 " e processo (DL n.º 130-A/2001)",
+        "aliases": "DL 130-A/2001,CDT,COMISSOES DE DISSUASAO,"
+                   "COMISSÕES DE DISSUASÃO",
+    },
+    ("pt", "2007", "lei", "37"): {
+        "source": pgdl_acquire, "nid": "1066",
+        "title": "Lei do Tabaco - exposição ao fumo ambiental (Lei n.º 37/2007)",
+        "aliases": "LEI DO TABACO,LEI 37/2007,LEI ANTI-TABACO",
+    },
     ("us", "1947", "usc", "9"): {
         "source": govinfo_acquire, "package": "USCODE-2023-title9",
         "title": "United States Code Title 9 - Arbitration (Federal Arbitration"
@@ -1359,6 +1380,25 @@ def q_resolve(con, citation):
         name = m.group(3).strip()
     else:
         sec, name = None, c
+    # structured Portuguese citation: "DL 130-A/2001", "Lei n.º 37/2007",
+    # "Decreto-Lei n.º 433/82", "Portaria 94/96"
+    pm = re.search(r"\b(DL|Decreto-Lei|Lei Orgânica|Lei|Portaria|Decreto"
+                   r" Regulamentar|DR)\s*(?:n\.?[ºo°]?\s*)?(\d+(?:-[A-Za-z])?)"
+                   r"/(\d{2,4})\b", name, re.IGNORECASE)
+    if pm:
+        ptype = {"dl": "dec-lei", "decreto-lei": "dec-lei", "lei": "lei",
+                 "lei orgânica": "lei-organica", "portaria": "portaria",
+                 "decreto regulamentar": "dec-regulamentar",
+                 "dr": "dec-regulamentar"}[pm.group(1).lower()]
+        pyear = int(pm.group(3))
+        if pyear < 100:
+            pyear += 1900 if pyear > 35 else 2000
+        row = con.execute("SELECT id FROM works WHERE id LIKE 'pt/%' AND type = ?"
+                          " AND number = ? AND year = ?",
+                          (ptype, pm.group(2).lower(), pyear)).fetchone()
+        if row:
+            expr = expression_for(con, row[0], "consolidated")
+            return {"id": _fragment_id(con, expr, sec) if sec else expr}
     ym = re.search(r"(\d{4})\s*$", name)
     year = int(ym.group(1)) if ym else None
     name_key = re.sub(r"[/,]?\s*\d{4}\s*$", "", name).strip().upper()

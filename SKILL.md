@@ -57,8 +57,12 @@ Add `--json` before the verb for machine-readable output (same exit codes).
   `#anexo-mapa` with the image's sha256, not yet transcribed); medical cannabis Lei 33/2018 `pt/2018/lei/33` + DL
   8/2019 `pt/2019/dec-lei/8`; Lei de Segurança Interna `pt/2008/lei/53`;
   Código Penal `pt/1982/dec-lei/400`; Código de Processo Penal
-  `pt/1987/dec-lei/78`; Estado de Sítio/Emergência `pt/1986/lei/44`
-  (all `@consolidated:pt`, PGDL).
+  `pt/1987/dec-lei/78`; Estado de Sítio/Emergência `pt/1986/lei/44`;
+  Regime Geral das Contra-Ordenações DL 433/82 `pt/1982/dec-lei/433`;
+  Comissões de Dissuasão (procedure) DL 130-A/2001
+  `pt/2001/dec-lei/130-a`; Lei do Tabaco Lei 37/2007 `pt/2007/lei/37`
+  (all `@consolidated:pt`, PGDL). Not on PGDL, so not ingested: Decreto
+  Regulamentar 61/94 (licit market / hemp cultivation).
 - **Brazil (elections)**: Código Eleitoral `br/1965/lei/4737`; Lei das
   Eleições `br/1997/lei/9504` (doações: art. 23); Lei dos Partidos
   `br/1995/lei/9096` (all `@consolidated:pt-BR`, Planalto).

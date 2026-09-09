@@ -237,6 +237,20 @@ class TestF5ExplicitVersions(DonnaCase):
             donna.q_resolve(self.con, "https://www.legislation.gov.uk/ukpga/"
                                       "1996/23/section/9/2000-01-01")
 
+    def test_pt_structured_citation_survives_dated_history(self):
+        with self.con:
+            self.con.execute("INSERT INTO works VALUES (?,?,?,?,?,?,?)",
+                             ("pt/2099/dec-lei/9", "pt", "dec-lei", 2099, "9",
+                              "Fixture Decreto", ""))
+            for ver in ("consolidated", "consolidated-2099-01-02"):
+                self.con.execute("INSERT INTO expressions VALUES (?,?,?,?,?,?,?)",
+                                 (f"pt/2099/dec-lei/9@{ver}:pt",
+                                  "pt/2099/dec-lei/9", ver, "pt",
+                                  "fixture://", "x", "now"))
+        out = donna.q_resolve(self.con, "DL 9/2099")
+        self.assertEqual(out["id"],
+                         "pt/2099/dec-lei/9@consolidated-2099-01-02:pt")
+
     def test_unqualified_citation_keeps_fallback(self):
         self.ingest()
         out = donna.q_resolve(self.con, "s 1 Fixture Act 2000")
