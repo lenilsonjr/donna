@@ -796,7 +796,7 @@ def govinfo_acquire(cfg, version):
 
 # ---------------------------------------------------------------- Wyoming adapter
 
-WY_PARSER = "donna-wy-pdf/0.3.0"
+WY_PARSER = "donna-wy-pdf/0.4.0"
 WY_BASE = "https://wyoleg.gov/statutes/compress/"
 
 def _monotone_chain(items, keyfn):
@@ -835,23 +835,22 @@ def wy_pdf_acquire(cfg, version):
         pdf = os.path.join(td, "t.pdf")
         with open(pdf, "wb") as fh:
             fh.write(raw)
-        r = subprocess.run(["pdftotext", "-enc", "UTF-8", pdf, "-"],
+        # -layout preserves reading order: default mode reorders hanging-
+        # indent continuations ahead of their lead-in lines (LAB via donna-29)
+        r = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", pdf, "-"],
                            capture_output=True, check=True)
     text = r.stdout.decode("utf-8", errors="replace").replace("\f", "\n")
     tnum = cfg["ws_title"]
-    head_re = re.compile(r"^(%s-\d+(?:\.\d+)?-\d+)\.(?:\s+(\S.*))?$"
+    head_re = re.compile(r"^[ \t]*(%s-\d+(?:\.\d+)?-\d+)\.(?:[ \t]+(\S.*))?$"
                          % re.escape(tnum), re.M)
     def key(number):
         parts = number.split("-")
         return tuple(float(x) if "." in x else int(x) for x in parts[1:])
     heads = list(head_re.finditer(text))
     picked = _monotone_chain(heads, lambda m: key(m.group(1)))
-    fragments, seen = [], set()
+    fragments, by_num = [], {}
     for i, m in enumerate(picked):
         number = m.group(1)
-        if number in seen:
-            continue
-        seen.add(number)
         end = picked[i + 1].start() if i + 1 < len(picked) else len(text)
         chunk = text[m.end():end]
         lines = [l for l in chunk.splitlines()]
@@ -862,11 +861,27 @@ def wy_pdf_acquire(cfg, version):
                     heading = l.strip()
                     lines = lines[j + 1:]
                     break
+        # layout mode wraps headings: continuation lines run until a blank
+        # line or the first subsection marker
+        if lines and not lines[0].strip():
+            lines = lines[1:]  # the newline ending the header line itself
+        while lines and lines[0].strip() and \
+                not re.match(r"\s*\(", lines[0]) and \
+                not head_re.match(lines[0]):
+            heading += " " + lines[0].strip()
+            lines = lines[1:]
         body = canonical("\n".join(lines))
         if not body:  # repealed sections carry only their status line
             body = heading
-        fragments.append({"kind": "section", "number": number,
-                          "heading": heading.rstrip("."), "text": body})
+        frag = {"kind": "section", "number": number,
+                "heading": heading.rstrip("."), "text": body}
+        prev = by_num.get(number)
+        if prev is None:
+            by_num[number] = frag
+            fragments.append(frag)
+        elif not prev["text"] and body:
+            # a stray bare header line can precede the real section
+            prev.update(frag)
     chapters = {f["number"].split("-")[1] for f in fragments}
     checks = {"tier": "C", "extractor": "pdftotext",
               "sections": len(fragments), "chapters": len(chapters),
@@ -1541,7 +1556,7 @@ def q_resolve(con, citation):
                 expr = expression_for(con, path, version.split(":")[0],
                                       strict=True)
         else:
-            expr = expression_for(con, path, "enacted")
+            expr = _default_expression(con, path)
         if frag:
             fid = f"{expr}{frag}"
             if not con.execute("SELECT 1 FROM fragments WHERE id = ?",
