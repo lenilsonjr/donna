@@ -284,7 +284,7 @@ def ie_acquire(year, wtype, num, version):
 
 # ---------------------------------------------------------------- Portugal adapter
 
-PT_PARSER = "donna-pt/0.8.0"
+PT_PARSER = "donna-pt/0.14.0"
 PT_BASE = "https://info.portaldasfinancas.gov.pt"
 
 class _PTBlocks(HTMLParser):
@@ -330,6 +330,48 @@ class _PTBlocks(HTMLParser):
 
 PT_CHROME = ("container-wrapper", "ms-core-overlay", "linksinfo")
 
+PT_ART_LINE = re.compile(r"Artigo\s+(\d+)\.?º?(?:\s*-\s*([A-Za-z]+))?",
+                         re.IGNORECASE)
+PT_FLAT_CUT = re.compile(r"Links Úteis|Contém as alterações|Consultar versões"
+                         r"|Consultar esta disposição|\[\+ info\]"
+                         r"|Redações anteriores")
+PT_REDACTION = re.compile(r"\((?:Redac?ção|Aditado|Epígrafe|Rectificad|Retificad)"
+                          r"[^)]*\)")
+
+def _pt_flat(src_html):
+    """Last-resort extraction for page vintages whose heading/body never
+    reach p/div blocks: strip to text lines and slice around the Artigo line.
+    Loses em-based redaction stripping, so those notes are removed textually."""
+    s = re.sub(r"<!--.*?-->", "", src_html, flags=re.S)
+    s = re.sub(r"<(?:script|style|select)[^>]*>.*?</(?:script|style|select)>",
+               "", s, flags=re.S | re.I)
+    s = re.sub(r"<br\s*/?>|</p>|</h\d>|</td>|</tr>|</div>", "\n", s, flags=re.I)
+    s = canonical(html.unescape(re.sub(r"<[^>]+>", "", s)))
+    lines = s.split("\n")
+    art_at = num = None
+    for k, l in enumerate(lines):
+        m = PT_ART_LINE.match(l)
+        if m and (len(l) <= 40 or not re.match(
+                r"\s*(?:d[aoe]s?\b|,|;|e\b|n\.º)", l[m.end():])):
+            art_at, num = k, m.group(1) + (
+                f"-{m.group(2).upper()}" if m.group(2) else "")
+            fused = l[m.end():].strip()
+            break
+    if art_at is None:
+        return None, "", 0, None
+    body = ([fused] if fused else []) + lines[art_at + 1:]
+    for k, l in enumerate(body):
+        if PT_FLAT_CUT.search(l):
+            body = body[:k]
+            break
+    red = sum(len(PT_REDACTION.findall(l)) for l in body)
+    body = [PT_REDACTION.sub("", l) for l in body]
+    heading = ""
+    if body and len(body[0]) <= 90 and not re.match(r"\d+\s*[-—.]|[a-z]\)|\(",
+                                                    body[0]):
+        heading, body = body[0], body[1:]
+    return canonical("\n".join(body)), heading, red, num
+
 def _pt_extract(html_text):
     """-> (body, heading, em_stripped, notes_stripped) or (None, ...) when the
     article heading cannot be located."""
@@ -340,13 +382,41 @@ def _pt_extract(html_text):
     body_shape = re.compile(r"(?:\d+\s*[-—.]|[a-z]\)|\(|Artigo)")
     start = heading = body_from = None
     for require_center in (True, False):
-        for i, (h, t, _) in enumerate(blocks):
+        for i, (h, t, em) in enumerate(blocks):
             if require_center and "atcenteredtext" not in h \
                     and "text-align:center" not in h:
                 continue
             lines = [l.strip() for l in t.split("\n")]
             art_at = next((k for k, l in enumerate(lines)
                            if art_re.match(l) and len(l) <= 40), None)
+            if art_at is None and lines:
+                # heading element fused with body text (h4 vintage):
+                # "Artigo 89.º-A a) Considera-se..." — split, unless the tail
+                # reads like a mid-sentence citation ("Artigo 63.º da LGT")
+                fm = art_re.match(lines[0])
+                if fm and len(lines[0]) > 40 and not re.match(
+                        r"\s*(?:d[aoe]s?\b|,|;|e\b|n\.º)", lines[0][fm.end():]):
+                    lines = [lines[0][:fm.end()],
+                             lines[0][fm.end():].strip()] + lines[1:]
+                    art_at = 0
+            if art_at is None and em:
+                # some vintages italicize the heading itself: the em buffer
+                # may hold "Artigo 19.º" (suffix "-A" in visible text) or a
+                # glued "Secção X Artigo 11.ºHeading" run
+                t_first = lines[0] if lines else ""
+                for el in em.split("\n"):
+                    am = art_re.search(el)
+                    if not am:
+                        continue
+                    sm = re.match(r"-[A-Za-z]+\b", t_first)
+                    suffix = sm.group(0) if sm else ""
+                    probe = el[am.start():am.end()] + suffix
+                    tail = el[am.end():].lstrip(" .-–")
+                    remainder = lines[1:] if (suffix or not t_first) else lines
+                    remainder = [l for l in remainder if not l.startswith("(")]
+                    lines = [probe] + ([tail] if tail else []) + remainder
+                    art_at = 0
+                    break
             if art_at is None:
                 continue
             start = i
@@ -365,7 +435,10 @@ def _pt_extract(html_text):
         if start is not None:
             break
     if start is None:
-        return None, "", parser.em_stripped, 0
+        fb_body, fb_head, fb_red, fb_num = _pt_flat(html_text)
+        if fb_body and fb_num:
+            return fb_body, fb_head, parser.em_stripped + fb_red, 0, fb_num
+        return None, "", parser.em_stripped, 0, None
     body, em_only, notes = [], [], 0
     for hint, txt, em_text in blocks[body_from:]:
         if any(c in hint for c in PT_CHROME) \
@@ -381,7 +454,30 @@ def _pt_extract(html_text):
     if not body and em_only:
         # a revoked article's whole body is its em-wrapped status line
         body = em_only
-    return canonical("\n".join(body)), heading, parser.em_stripped, notes
+    if heading and ("\n" in heading or len(heading) > 90):
+        # heading glue: some vintages pack epigraph and body into one block
+        hl = heading.split("\n")
+        keep = hl[0] if len(hl[0]) <= 90 and not body_shape.match(hl[0]) else ""
+        spill = hl[1:] if keep else hl
+        if spill:
+            body = [canonical("\n".join(spill))] + body
+        heading = keep
+    if heading and body_shape.match(heading):
+        # rest-of-block text was statutory body, not an epigraph
+        body.insert(0, heading)
+        heading = ""
+    num = None
+    nm = re.match(r"Artigo\s+(\d+)\.?º?(?:\s*-\s*([A-Za-z]+))?",
+                  lines[art_at], re.IGNORECASE)
+    if nm:
+        num = nm.group(1) + (f"-{nm.group(2).upper()}" if nm.group(2) else "")
+    out_body = canonical("\n".join(body))
+    if not out_body:
+        fb_body, fb_head, fb_red, fb_num = _pt_flat(html_text)
+        if fb_body:
+            return fb_body, heading or fb_head, \
+                parser.em_stripped + fb_red, notes, num or fb_num
+    return out_body, heading, parser.em_stripped, notes, num
 
 def pt_at_acquire(cfg, version):
     if version != "consolidated":
@@ -391,29 +487,52 @@ def pt_at_acquire(cfg, version):
     seen, pages = set(), []
     base = re.sub(r"^https?://[^/]+", "", cfg["index"])
     base = re.split(r"/pages/", base, flags=re.IGNORECASE)[0]
-    for m in re.finditer(r'href="(%s/pages/%s(\d+)([a-z]?)\.aspx)"'
-                         % (re.escape(base), cfg["slug"]),
-                         index_html, re.IGNORECASE):
-        href, digits, letter = m.groups()
-        number = digits + (f"-{letter.upper()}" if letter else "")
-        if number in seen:
-            continue
-        seen.add(number)
-        pages.append((number, PT_BASE + href if href.startswith("/") else href))
+    if cfg.get("harvest_all"):
+        # heterogeneous link shapes: fetch every page in the index's own
+        # directory; article numbers come from the pages themselves
+        idx_name = cfg["index"].rsplit("/", 1)[-1].lower()
+        for m in re.finditer(r'href="(%s/pages/([^"/]+\.aspx))"'
+                             % re.escape(base), index_html, re.IGNORECASE):
+            href, leaf = m.group(1), m.group(2).lower()
+            if leaf == idx_name or leaf == "default.aspx" or href in seen:
+                continue
+            seen.add(href)
+            pages.append((None, PT_BASE + href if href.startswith("/") else href))
+    else:
+        for m in re.finditer(r'href="(%s/pages/%s(\d+)([a-z]?)\.aspx)"'
+                             % (re.escape(base), cfg["slug"]),
+                             index_html, re.IGNORECASE):
+            href, digits, letter = m.groups()
+            number = digits + (f"-{letter.upper()}" if letter else "")
+            if number in seen:
+                continue
+            seen.add(number)
+            pages.append((number, PT_BASE + href if href.startswith("/") else href))
     if not pages:
         sys.exit("no article pages found in index — page layout may have changed")
     fragments, raw_parts = [], [index_raw]
     em_total = notes_total = 0
-    unparsed = []
+    unparsed, nonarticle, have_nums = [], [], set()
     for number, url in pages:
         raw = fetch(url)
         raw_parts.append(raw)
-        body, heading, em_n, notes_n = _pt_extract(raw.decode("utf-8", errors="replace"))
+        body, heading, em_n, notes_n, page_num = _pt_extract(
+            raw.decode("utf-8", errors="replace"))
         em_total += em_n
         notes_total += notes_n
-        if body is None:
+        if number is None:  # harvest_all: trust the page's own numbering
+            if body is None or page_num is None:
+                nonarticle.append(url.rsplit("/", 1)[-1])
+                time.sleep(0.25)
+                continue
+            if page_num in have_nums:
+                time.sleep(0.25)
+                continue
+            number = page_num
+        elif body is None:
             unparsed.append(number)
             body = ""
+        have_nums.add(number)
         fragments.append({"kind": "article", "number": number, "heading": heading,
                           "text": body})
         time.sleep(0.25)
@@ -424,6 +543,7 @@ def pt_at_acquire(cfg, version):
               "numbering_gaps": numbering_gaps(seq),
               "empty_fragments": [f["number"] for f in fragments if not f["text"]],
               "unparsed_pages": unparsed,
+              "nonarticle_pages_skipped": nonarticle,
               "redaction_notes_stripped": em_total,
               "editorial_notes_stripped": notes_total}
     return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
@@ -1086,6 +1206,21 @@ WORKS = {
                  " de Canábis (DL n.º 8/2019)",
         "aliases": "DL 8/2019,REGULAMENTO DA CANABIS",
     },
+    ("pt", "1989", "dec-lei", "215"): {
+        "source": pt_at_acquire, "harvest_all": True, "slug": "ebf",
+        "index": PT_BASE + "/pt/informacao_fiscal/codigos_tributarios/bf_rep"
+                 "/Pages/estatuto-dos-beneficios-fiscais-indice.aspx",
+        "title": "Estatuto dos Benefícios Fiscais (DL n.º 215/89)",
+        "aliases": "EBF,ESTATUTO DOS BENEFICIOS FISCAIS,"
+                   "ESTATUTO DOS BENEFÍCIOS FISCAIS",
+    },
+    ("pt", "1998", "dec-lei", "398"): {
+        "source": pt_at_acquire, "slug": "lgt",
+        "index": PT_BASE + "/pt/informacao_fiscal/codigos_tributarios/lgt"
+                 "/Pages/lei-geral-tributaria-indice.aspx",
+        "title": "Lei Geral Tributária (DL n.º 398/98)",
+        "aliases": "LGT,LEI GERAL TRIBUTARIA,LEI GERAL TRIBUTÁRIA",
+    },
     ("pt", "1996", "portaria", "94"): {
         "source": pgdl_acquire, "nid": "192",
         "points": True,
@@ -1234,6 +1369,10 @@ def _gate_ingest(res):
     for key in ("unparsed_pages", "toc_missing"):
         if res["checks"].get(key):
             reasons.append(f"{key}: {res['checks'][key]}")
+    empties = res["checks"].get("empty_fragments") or []
+    if len(empties) > max(4, len(res["fragments"]) // 5):
+        reasons.append(f"mass-empty extraction: {len(empties)} of"
+                       f" {len(res['fragments'])} fragments empty")
     return reasons
 
 def ingest(con, work_path, allow_defects=False):

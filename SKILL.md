@@ -63,6 +63,13 @@ Add `--json` before the verb for machine-readable output (same exit codes).
   `pt/2001/dec-lei/130-a`; Lei do Tabaco Lei 37/2007 `pt/2007/lei/37`
   (all `@consolidated:pt`, PGDL). Not on PGDL, so not ingested: Decreto
   Regulamentar 61/94 (licit market / hemp cultivation).
+- **Portugal (tax, cont.)**: Estatuto dos Benefícios Fiscais
+  `pt/1989/dec-lei/215` (128 articles incl. art. 58.º-A, IFICI/new NHR);
+  Lei Geral Tributária `pt/1998/dec-lei/398` (117 articles — 38 antiabuso,
+  63-D regime fiscal claramente mais favorável, 68 informações
+  vinculativas). Portaria 150/2004 (lista de paraísos fiscais) is NOT
+  ingested: not on PGDL or Portal das Finanças codes area; DRE consolidada
+  is SPA-blocked — do not quote the list from memory or web sources as law.
 - **Portugal (civil)**: Código Civil `pt/1966/dec-lei/47344` (2,382
   articles — 483/496 responsabilidade e danos, 1207–1230 empreitada);
   Código de Processo Civil `pt/2013/lei/41` (1,146 articles); Lei de Defesa
