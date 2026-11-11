@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """donna — the law layer. Versioned, hash-anchored legal corpus with a resolver
 and quote verifier. See SPEC.md; adapters: ie (eISB + LRC), pt (Portal das
-Finanças, configured works).
+Finanças, configured works), br (Planalto, Câmara LEGIN, INPI Manual de Marcas).
 
 Usage:
   donna.py ingest ie/2018/act/7                fetch + parse + store + attest
@@ -691,21 +691,9 @@ BR_EDITORIAL = re.compile(
     r"\(\s*(?:Redação dada|Incluíd[oa]|Acrescid[oa]|Renumerad[oa]|Vide|"
     r"Regulamento|Vigência|Produção de efeito)[^)]*\)", re.I)
 
-def planalto_acquire(cfg, version):
-    if version != "consolidated":
-        raise DonnaError("this source serves @consolidated only")
-    # planalto.gov.br resets connections from non-browser user agents
-    raw = fetch(cfg["url"], ua=BROWSER_UA)
-    page = raw.decode("windows-1252", errors="replace")
-    counts = {"strike": len(re.findall(r"<strike", page, re.I))}
-    page = re.sub(r"<strike.*?</strike>", "", page, flags=re.S | re.I)
-    page = re.sub(r"<(?:script|style).*?</(?:script|style)>", "", page,
-                  flags=re.S | re.I)
-    page = re.sub(r"</p>|<br\s*/?>", "\n", page, flags=re.I)
-    text = html.unescape(re.sub(r"<[^>]+>", "", page))
-    counts["editorial"] = len(BR_EDITORIAL.findall(text))
-    text = BR_EDITORIAL.sub("", text)
-    text = canonical(text)
+def _br_articles(text, counts):
+    """Split a consolidated Brazilian statute into article fragments.
+    Shared by the Planalto and Câmara adapters."""
     # cut the signature block after the last article
     sig = re.search(r"(?m)^Brasília,\s", text)
     art_re = re.compile(r"(?m)^\s*Art\.?\s*(\d+)(?:º|o)?(?:-([A-Z]))?[\s.]")
@@ -743,12 +731,178 @@ def planalto_acquire(cfg, version):
               "numbering_gaps": numbering_gaps(seq),
               "empty_fragments": [f["number"] for f in fragments if not f["text"]],
               "quoted_headers_skipped": quoted_skipped,
-              "struck_blocks_stripped": counts["strike"],
-              "editorial_notes_stripped": counts["editorial"]}
+              **counts}
+    return fragments, checks
+
+def planalto_acquire(cfg, version):
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    # planalto.gov.br resets connections from non-browser user agents
+    raw = fetch(cfg["url"], ua=BROWSER_UA)
+    page = raw.decode("windows-1252", errors="replace")
+    counts = {"strike": len(re.findall(r"<strike", page, re.I))}
+    page = re.sub(r"<strike.*?</strike>", "", page, flags=re.S | re.I)
+    page = re.sub(r"<(?:script|style).*?</(?:script|style)>", "", page,
+                  flags=re.S | re.I)
+    page = re.sub(r"</p>|<br\s*/?>", "\n", page, flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", "", page))
+    counts["editorial"] = len(BR_EDITORIAL.findall(text))
+    text = BR_EDITORIAL.sub("", text)
+    text = canonical(text)
+    fragments, checks = _br_articles(text, {"struck_blocks_stripped": counts["strike"],
+                                             "editorial_notes_stripped": counts["editorial"]})
     return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
             "fragments": fragments, "label": "consolidated", "lang": "pt-BR",
             "source_url": cfg["url"], "raw": raw,
             "checks": checks, "parser": BR_PARSER}
+
+# ---------------------------------------------------------------- Câmara (legin) adapter
+
+CAMARA_PARSER = "donna-camara-legin/0.1.0"
+CAMARA_EDITORIAL = re.compile(
+    r"\(\s*(?:Artigo|Parágrafo|Inciso|Alínea|Caput|Item|Expressão|Redação|"
+    r"Revogad[oa]|Acrescid[oa]|Incluíd[oa]|Renumerad[oa]|Declarad[oa]|Vide|"
+    r"Vigência|Suspens[oa]|Vetad[oa]|Prazo)[^()]*(?:\([^()]*\)[^()]*)*\)", re.I)
+
+BR_STRUCT = re.compile(r"^(?:LIVRO|TÍTULO|CAPÍTULO|Seção|Subseção|SEÇÃO|SUBSEÇÃO)"
+                       r"\s+(?:[IVXLCDM]+|ÚNIC[OA]|Únic[oa])(?:\s*-\s*[A-Z])?\.?$")
+
+def camara_acquire(cfg, version):
+    """Câmara dos Deputados LEGIN 'norma atualizada' pages: the consolidated
+    text with amendment notes in parentheses. Used where planalto.gov.br is
+    unreachable; the attestation records which source served the text."""
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    raw = fetch(cfg["url"], ua=BROWSER_UA)
+    page = raw.decode("utf-8", errors="replace")
+    if "normaatualizada" not in cfg["url"]:
+        raise DonnaError("Câmara adapter expects a 'normaatualizada' URL")
+    counts = {"strike": len(re.findall(r"<(?:strike|s|del)\b", page, re.I))}
+    page = re.sub(r"<(strike|s|del)\b.*?</\1>", "", page, flags=re.S | re.I)
+    page = re.sub(r"<(?:script|style|head).*?</(?:script|style|head)>", "", page,
+                  flags=re.S | re.I)
+    page = re.sub(r"\s+", " ", page)  # the source hard-wraps inside <p>
+    page = re.sub(r"</p>|<br\s*/?>|</h\d>|</div>|</tr>", "\n", page, flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", "", page))
+    # amendment notes ("Revogado pela Lei …", "declarado inconstitucional …")
+    # are KEPT: a repealed device must not read as an empty one
+    counts["editorial"] = len(CAMARA_EDITORIAL.findall(text))
+    text = canonical(text)
+    start = re.search(r"(?m)^Art\.?\s*1\s*[º°o]?\s", text)
+    if not start:
+        raise DonnaError("no 'Art. 1' found — page layout may have changed")
+    fragments, checks = _br_articles(text[start.start():],
+                                     {"struck_blocks_stripped": counts["strike"],
+                                      "editorial_notes_kept": counts["editorial"],
+                                      "source": "camara-legin"})
+    # structural headings (TÍTULO/CAPÍTULO/Seção + name line) trail the article
+    # before them; move them to the heading of the article they introduce
+    moved, pending = 0, ""
+    for f in fragments:
+        f["heading"] = pending
+        lines = f["text"].split("\n")
+        cut = len(lines)
+        while cut > 1:
+            if cut >= 2 and BR_STRUCT.match(lines[cut - 2]):
+                cut -= 2
+            elif BR_STRUCT.match(lines[cut - 1]):
+                cut -= 1
+            else:
+                break
+        pending = " - ".join(lines[cut:])
+        if cut < len(lines):
+            moved += 1
+            f["text"] = "\n".join(lines[:cut])
+    checks["structural_headings_moved"] = moved
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "pt-BR",
+            "source_url": cfg["url"], "raw": raw,
+            "checks": checks, "parser": CAMARA_PARSER}
+
+# ---------------------------------------------------------------- INPI Manual de Marcas adapter
+
+INPI_MANUAL_PARSER = "donna-inpi-manual/0.1.0"
+INPI_MANUAL_BASE = "https://manualdemarcas.inpi.gov.br"
+INPI_MANUAL_PAGE = re.compile(r"/projects/manual/wiki/(?:\d{2}_|\d+(?:·|%C2%B7)\d+_)[^\"#?<>\s]+")
+INPI_MANUAL_HEAD = re.compile(r"<h([2-4])\b[^>]*>(.*?)</h\1>", re.S | re.I)
+INPI_MANUAL_NUM = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(\S.*)$")
+
+def _inpi_manual_body(page):
+    i = page.find('<div class="wiki wiki-page"')
+    if i < 0:
+        return None
+    j = page.find('<div style="clear:both', i)
+    k = page.find('<div id="footer"', i)
+    ends = [e for e in (j, k) if e > 0]
+    return page[i:min(ends)] if ends else page[i:]
+
+def _inpi_manual_text(chunk, counts):
+    counts["images"] += len(re.findall(r"<img\b", chunk, re.I))
+    chunk = re.sub(r'<a [^>]*class="wiki-anchor"[^>]*>.*?</a>', "", chunk, flags=re.S)
+    chunk = re.sub(r"\s+", " ", chunk)
+    chunk = re.sub(r"</t[dh]>", " | ", chunk, flags=re.I)
+    chunk = re.sub(r"</p>|<br\s*/?>|</h\d>|</li>|</tr>|</div>|<h\d\b[^>]*>",
+                   "\n", chunk, flags=re.I)
+    return canonical(html.unescape(re.sub(r"<[^>]+>", "", chunk)))
+
+def inpi_manual_acquire(cfg, version):
+    """INPI Manual de Marcas (Redmine wiki). One fragment per numbered item
+    (5.12, 5.12.1 …); unnumbered sub-headings stay inside their item."""
+    if version != "consolidated":
+        raise DonnaError("this source serves @consolidated only")
+    import urllib.parse
+    start = INPI_MANUAL_BASE + "/projects/manual/wiki"
+    queue, seen, pages = [start], set(), []
+    while queue and len(seen) < cfg.get("max_pages", 400):
+        url = queue.pop(0)
+        if url in seen:
+            continue
+        seen.add(url)
+        raw_page = fetch(url, ua=BROWSER_UA)
+        time.sleep(cfg.get("delay", 0.4))
+        page = raw_page.decode("utf-8", errors="replace")
+        for href in INPI_MANUAL_PAGE.findall(page):
+            nxt = INPI_MANUAL_BASE + urllib.parse.quote(urllib.parse.unquote(href))
+            if nxt not in seen and nxt not in queue:
+                queue.append(nxt)
+        if url != start:
+            pages.append((url, raw_page, page))
+    pages.sort(key=lambda p: p[0])
+    counts = {"images": 0}
+    found, unparsed = {}, []
+    for url, _, page in pages:
+        body = _inpi_manual_body(page)
+        if body is None:
+            unparsed.append(url)
+            continue
+        heads = []
+        for m in INPI_MANUAL_HEAD.finditer(body):
+            title = _inpi_manual_text(m.group(2), counts).replace("\n", " ")
+            nm = INPI_MANUAL_NUM.match(title)
+            if nm:
+                heads.append((m.start(), m.end(), nm.group(1), nm.group(2)))
+        for n, (s, e, number, heading) in enumerate(heads):
+            end = heads[n + 1][0] if n + 1 < len(heads) else len(body)
+            text = _inpi_manual_text(body[e:end], counts)
+            prev = found.get(number)
+            # chapter pages repeat sub-item headings as a table of contents;
+            # the item's own page carries the full text, so the longest wins
+            if prev is None or len(text) > len(prev["text"]):
+                found[number] = {"kind": "section", "number": number,
+                                 "heading": heading, "text": text, "url": url}
+    key = lambda num: tuple(int(x) for x in num.split("."))
+    fragments = [{k: v for k, v in found[n].items() if k != "url"}
+                 for n in sorted(found, key=key)]
+    raw = b"\n".join(p[1] for p in pages)
+    checks = {"tier": "B", "pages": len(pages), "sections": len(fragments),
+              "unparsed_pages": unparsed,
+              "empty_fragments": [f["number"] for f in fragments if not f["text"]],
+              "images_not_transcribed": counts["images"],
+              "chapters": sorted({f["number"].split(".")[0] for f in fragments}, key=int)}
+    return {"work_meta": {"title": cfg["title"], "aliases": cfg["aliases"]},
+            "fragments": fragments, "label": "consolidated", "lang": "pt-BR",
+            "source_url": start, "raw": raw,
+            "checks": checks, "parser": INPI_MANUAL_PARSER}
 
 # ---------------------------------------------------------------- GovInfo adapter
 
@@ -1203,6 +1357,22 @@ WORKS = {
         "title": "Lei das Eleições - Lei n.º 9.504/1997",
         "aliases": "LEI DAS ELEICOES,LEI DAS ELEIÇÕES,LEI 9504,LEI 9.504",
     },
+    ("br", "1996", "lei", "9279"): {
+        # planalto.gov.br is unreachable from some networks; the Câmara LEGIN
+        # 'norma atualizada' carries the same consolidated text
+        "source": camara_acquire,
+        "url": "https://www2.camara.leg.br/legin/fed/lei/1996/"
+               "lei-9279-14-maio-1996-374644-normaatualizada-pl.html",
+        "title": "Lei da Propriedade Industrial - Lei n.º 9.279/1996",
+        "aliases": "LPI,LEI DA PROPRIEDADE INDUSTRIAL,LEI 9279,LEI 9.279",
+    },
+    ("br", "2022", "inpi-manual", "marcas"): {
+        # the Manual carries no edition year; 2022 = Portaria INPI/PR nº 8/2022,
+        # the regulation the current Manual implements (cited throughout)
+        "source": inpi_manual_acquire,
+        "title": "Manual de Marcas do INPI",
+        "aliases": "MANUAL DE MARCAS,MANUAL DE MARCAS DO INPI,MANUAL INPI",
+    },
     ("br", "1995", "lei", "9096"): {
         "source": planalto_acquire,
         "url": "https://www.planalto.gov.br/ccivil_03/leis/l9096.htm",
@@ -1581,6 +1751,24 @@ def q_resolve(con, citation):
         if row:
             expr = _default_expression(con, row[0])
             return {"id": _fragment_id(con, expr, m.group(2))}
+    # Brazilian IP: "art. 124, XIX, da LPI", "art. 158, § 1º, da Lei 9.279/96"
+    # (fragments are article-level; inciso/§ pointers narrow the reading only)
+    m = re.search(r"\bart(?:igo|\.)?\s*(\d+)\s*[º°o]?(?:\s*-\s*([A-Za-z]))?"
+                  r"(?:\s*,?\s*(?:caput|inciso\s+[IVXLC]+|[IVXLC]+\b|§+\s*\d+\s*[º°o]?"
+                  r"|par[áa]grafo\s+único|al[íi]nea\s+\w))*"
+                  r"\s*,?\s*(?:d[aoe]\s+)?(?:LPI\b|Lei\s*(?:n\.?\s*[º°o]?\s*)?"
+                  r"9\.?279(?:\s*/\s*(?:19)?96)?)", c, re.IGNORECASE)
+    if m:
+        expr = _default_expression(con, "br/1996/lei/9279")
+        sec = m.group(1) + (f"-{m.group(2).upper()}" if m.group(2) else "")
+        return {"id": _fragment_id(con, expr, sec)}
+    # INPI Manual de Marcas: "item 5.12.1 do Manual de Marcas", "Manual 5.11"
+    m = re.search(r"(?:item\s+|seção\s+)?(\d+(?:\.\d+)+)\.?\s*(?:d[oa]\s+)?Manual"
+                  r"|Manual(?:\s+de\s+Marcas)?(?:\s+do\s+INPI)?\s*,?\s*(?:item\s+)?"
+                  r"(\d+(?:\.\d+)*)", c, re.IGNORECASE)
+    if m:
+        expr = _default_expression(con, "br/2022/inpi-manual/marcas")
+        return {"id": _fragment_id(con, expr, m.group(1) or m.group(2))}
     m = re.search(r"(?:^|\b)(?:s\.?|section|art\.?|article|artigo)\s*"
                   r"(\d+[A-Z]*)(?:\.?º)?(?:\s*-\s*([A-Za-z]))?"
                   r"\s+(?:of\s+(?:the\s+)?|d[oa]\s+)?(.+)", c, re.IGNORECASE)

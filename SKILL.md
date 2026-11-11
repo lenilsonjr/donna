@@ -80,6 +80,25 @@ Add `--json` before the verb for machine-readable output (same exit codes).
 - **Brazil (elections)**: Código Eleitoral `br/1965/lei/4737`; Lei das
   Eleições `br/1997/lei/9504` (doações: art. 23); Lei dos Partidos
   `br/1995/lei/9096` (all `@consolidated:pt-BR`, Planalto).
+- **Brazil (propriedade industrial / marcas)**: Lei da Propriedade
+  Industrial `br/1996/lei/9279` (LPI, 248 articles, `@consolidated:pt-BR`,
+  Câmara LEGIN "norma atualizada" — Planalto is unreachable from some
+  networks; amendment/repeal notes such as "(Revogado pela Lei nº 14.195…)"
+  are KEPT in the text, so a repealed device never reads as empty; TÍTULO /
+  CAPÍTULO / Seção lines live in the fragment heading). Key articles: 122–126
+  (registrabilidade; 124 = sinais não registráveis, XIX = colidência), 129
+  (§ 1º precedência), 158–159 (oposição e manifestação, 60 dias), 219
+  (não conhecimento), 168–175 (nulidade). Resolve accepts "art. 124, XIX, da
+  LPI", "art. 158, § 1º, da Lei 9.279/96" (fragments are article-level; the
+  inciso/§ only tells you where to read). INPI Manual de Marcas
+  `br/2022/inpi-manual/marcas` (`@consolidated:pt-BR`, manualdemarcas.inpi.gov.br,
+  one fragment per numbered item: 5.11.1 colidência, 5.11.2 afinidade
+  mercadológica, 5.12.x oposição, 3.6.3 petições de manifestação). Resolve
+  accepts "item 5.12.1 do Manual de Marcas" and "Manual de Marcas 5.11.2".
+  The Manual is INPI guidance, not law: cite it as the examiner's criteria,
+  the LPI as the rule. Its 279 figures (example marks) are not transcribed.
+  Not ingested yet: Portaria INPI/PR nº 8/2022 (cited throughout the Manual),
+  Tabela de Retribuições, Classificação de Nice. No case law, no RPI.
 - **US federal**: Internal Revenue Code `us/1986/usc/26` (1,875 sections)
   and Title 15 Commerce and Trade `us/1926/usc/15` (2,434 sections — Sherman
   Act at `#sec-1`), 2023 editions via GovInfo (`@consolidated:en`); resolve
